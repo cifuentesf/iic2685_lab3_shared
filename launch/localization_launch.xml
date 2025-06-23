@@ -1,0 +1,28 @@
+<launch>
+  <!-- Simulador del robot -->
+  <include file="$(find-pkg-name very_simple_robot_simulator)/launch/lidar_simulator.xml" />
+  
+  <!-- Nodo del mapa -->
+  <node pkg="nav2_map_server" 
+        exec="map_server" 
+        name="map_server" 
+        output="screen">
+    <param name="yaml_filename" value="$(find-pkg-name iic2685_lab3)/mapas/mapa.yaml"/>
+    <param name="topic_name" value="map"/>
+    <param name="frame_id" value="map"/>
+  </node>
+  
+  <!-- Nodo de localización con filtro de partículas -->
+  <node pkg="iic2685_lab3"
+        exec="particle_filter_localization"
+        name="particle_filter_localization"
+        output="screen"/>
+  
+  <!-- RViz para visualización -->
+  <node pkg="rviz2" 
+        exec="rviz2" 
+        name="rviz2" 
+        output="screen"
+        args="-d $(find-pkg-name iic2685_lab3)/config/localization.rviz"/>
+        
+</launch>
