@@ -1,7 +1,9 @@
 <launch>
-  <!-- Simulador del robot -->
-  <include file="$(find-pkg-name very_simple_robot_simulator)/launch/lidar_simulator.xml" />
+  <include file="$(find-pkg-share very_simple_robot_simulator)/launch/minimal_simulator_py.xml" />
+  <include file="$(find-pkg-share very_simple_robot_simulator)/launch/lidar_simulator.xml" />
+  <include file="$(find-pkg-share very_simple_robot_simulator)/launch/world_state.xml" />
   
+
   <!-- Nodo del mapa -->
   <node pkg="nav2_map_server" 
         exec="map_server" 

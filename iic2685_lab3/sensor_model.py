@@ -12,6 +12,31 @@ from scipy import spatial
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 
+def ocuppancy_grid_map():
+    pass
+
+def monte_carlo_localization(x_t, y_t, theta_t, z_t, M):
+
+    m = 1
+    """Implementación del algoritmo de localización Monte Carlo"""
+    # x_t: coordenada x del robot
+    # y_t: coordenada y del robot
+    # theta_t: orientación del robot
+    # z_t: lectura del sensor (LIDAR)
+    # m: mapa de ocupación (OccupancyGrid)
+    # Retorna la probabilidad de la pose del robot
+    # (x_t, y_t, theta_t) dado el mapa m y la lectura
+    # z_t.
+    # Aquí se implementaría el algoritmo de Monte Carlo
+    # para calcular la probabilidad de la pose del robot.   
+
+    pass
+
+
+
+
+
+
 class SensorModel(Node):
     def __init__(self):
         super().__init__('sensor_model')

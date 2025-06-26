@@ -1,4 +1,6 @@
 from setuptools import setup
+import os
+from glob import glob
 
 package_name = 'iic2685_lab3'
 
@@ -10,17 +12,20 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        (os.path.join('share', package_name, 'launch'), glob('launch/*.*')),
+        (os.path.join('share', package_name, 'mapas'), glob('mapas/*')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='mcifuentesf',
-    maintainer_email='tu_correo@ejemplo.cl',
-    description='Paquete para laboratorio 3 de IIC2685',
-    license='MIT',
+    maintainer_email='mcifuentesf@todo.todo',
+    description='TODO: Package description',
+    license='TODO: License declaration',
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'simple_publisher = iic2685_lab3.simple_publisher:main',
+            'sensor_model = iic2685_lab3.sensor_model:main',
+            'particle_filter_localization = iic2685_lab3.particle_filter_localization:main',
         ],
     },
 )

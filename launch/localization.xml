@@ -1,0 +1,41 @@
+<launch>
+
+  <!-- 🔁 Transformación fija world_map → odom -->
+  <node pkg="tf2_ros" exec="static_transform_publisher" name="world_map_to_odom"
+        args="--x 0.5 --y 0.5 --z 0.0 --roll 0.0 --pitch 0.0 --yaw 0.0 --frame-id world_map --child-frame-id odom" />
+
+  <!-- 🤖 Simulador del robot Kobuki -->
+  <node pkg="very_simple_robot_simulator" exec="kobuki_simulator.py" name="kobuki_simulator">
+    <param name="initial_x" value="0.5"/>
+    <param name="initial_y" value="0.5"/>
+    <param name="initial_yaw" value="0.0"/>
+  </node>
+
+  <!-- 🌎 Estado del mundo y mapa -->
+  <node pkg="very_simple_robot_simulator" exec="world_state_gui.py" name="world_state_gui" output="screen">
+    <param name="map_file" value="$(find-pkg-share iic2685_lab3)/mapas/mapa.yaml"/>
+  </node>
+
+  <!-- 🔦 LIDAR simulado -->
+  <node pkg="very_simple_robot_simulator" exec="lidar_simulator" name="lidar_simulator">
+    <param name="effective_hfov" value="181.0"/>
+    <param name="view_depth" value="20.0"/>
+  </node>
+
+  <!-- 🌈 RViz -->
+  <node pkg="rviz2" exec="rviz2" name="rviz2" output="screen"
+        args="-d $(find-pkg-share iic2685_lab3)/rviz/localization.rviz" />
+
+  <!-- ⌨️ Control por teclado (opcional) -->
+  <node pkg="teleop_twist_keyboard" exec="teleop_twist_keyboard" name="teleop_twist_keyboard" output="screen" />
+
+  <!-- 🎯 Nodo de verosimilitud -->
+  <node pkg="iic2685_lab3" exec="likelihood_map.py" name="likelihood_map" output="screen" />
+
+  <!-- 🧭 Nodo de filtro de partículas -->
+  <node pkg="iic2685_lab3" exec="particle_filter.py" name="particle_filter" output="screen" />
+
+  <!-- 🤖 Nodo de exploración reactiva -->
+  <node pkg="iic2685_lab3" exec="motion_controller.py" name="motion_controller" output="screen" />
+
+</launch>
