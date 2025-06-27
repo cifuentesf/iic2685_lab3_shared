@@ -14,6 +14,7 @@ setup(
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'launch'), glob('launch/*.*')),
         (os.path.join('share', package_name, 'mapas'), glob('mapas/*')),
+        (os.path.join('share', package_name, 'rviz'), glob('rviz/*.*')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -24,8 +25,9 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'sensor_model = iic2685_lab3.sensor_model:main',
-            'particle_filter_localization = iic2685_lab3.particle_filter_localization:main',
+            'likelihood_map.py = iic2685_lab3.likelihood_map:main',
+            'particle_filter.py = iic2685_lab3.particle_filter:main',
+            'motion_controller.py = iic2685_lab3.motion_controller:main',
         ],
     },
 )
