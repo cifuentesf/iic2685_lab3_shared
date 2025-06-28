@@ -1,4 +1,6 @@
 from setuptools import find_packages, setup
+import os
+from glob import glob
 
 package_name = 'iic2685_lab3'
 
@@ -10,8 +12,9 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        ('share/' + package_name + '/launch', ['launch/localization.xml']),
-        ('share/' + package_name + '/maps', ['maps/mapa.pgm', 'maps/mapa.yaml']),
+        (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.xml')),
+        (os.path.join('share', package_name, 'maps'), glob('maps/*')),
+        (os.path.join('share', package_name, 'rviz'), glob('rviz/*.rviz')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -22,10 +25,9 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'sensor_model.py = iic2685_lab3.sensor_model:main',
-            'particle_filter.py = iic2685_lab3.particle_filter:main',
-            'exploration_navigator.py = iic2685_lab3.exploration_navigator:main',
-            'localization_manager.py = iic2685_lab3.localization_manager:main',
+            'sensor_model = iic2685_lab3.sensor_model:main',
+            'particle_filter = iic2685_lab3.particle_filter:main',
+            'visualize_sensor_model = iic2685_lab3.visualize_sensor_model:main',
         ],
     },
 )
