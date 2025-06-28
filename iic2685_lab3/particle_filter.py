@@ -1,458 +1,433 @@
 #!/usr/bin/env python3
 """
-Actividad 2: Filtro de Partículas para Localización (Monte Carlo Localization)
-Basado en Probabilistic Robotics, Cap. 8 (Thrun et al.)
+Actividad 2: Filtro de Partículas para Localización
+Implementa Monte Carlo Localization (MCL) usando el modelo de sensor Likelihood Fields
 """
-
 import rclpy
 from rclpy.node import Node
-from nav_msgs.msg import Odometry
-from sensor_msgs.msg import LaserScan
-from geometry_msgs.msg import PoseArray, Pose, PoseStamped, Quaternion, Twist
-from visualization_msgs.msg import MarkerArray, Marker
-from tf_transformations import quaternion_from_euler, euler_from_quaternion
-from std_msgs.msg import Float32
 import numpy as np
-import yaml
-import os
-import cv2
-from math import sin, cos, atan2, sqrt, pi, exp
-from scipy.spatial import KDTree
-from numpy.random import normal, uniform, choice
-import threading
+import math
+import random
+from geometry_msgs.msg import Pose, PoseStamped, PoseArray, Twist
+from nav_msgs.msg import OccupancyGrid, Odometry
+from sensor_msgs.msg import LaserScan
+from visualization_msgs.msg import MarkerArray, Marker
+from std_msgs.msg import Header, Bool
+from tf_transformations import euler_from_quaternion, quaternion_from_euler
+from random import gauss
+import copy
 
-class ParticleFilter(Node):
+
+class Particle:
+    """
+    Representa una partícula en el filtro
+    Basada en la clase Particle de la ayudantía
+    """
+    def __init__(self, x=0.0, y=0.0, ang=0.0, sigma=0.1):
+        self.x = x
+        self.y = y
+        self.ang = ang  
+        self.last_x = x
+        self.last_y = y
+        self.last_ang = ang
+        self.sigma = sigma
+        self.weight = 1.0  # Peso para el filtro de partículas
+    
+    def move(self, delta_x, delta_y, delta_ang):
+        """
+        Mueve la partícula aplicando deltas con ruido gaussiano
+        Igual que en la ayudantía
+        """
+        # Guardar posición anterior
+        self.last_x = self.x
+        self.last_y = self.y  
+        self.last_ang = self.ang
+        
+        # Movimiento con ruido
+        self.x += delta_x + gauss(0, self.sigma)
+        self.y += delta_y + gauss(0, self.sigma)
+        self.ang += delta_ang + gauss(0, self.sigma)
+    
+    def pos(self):
+        """Retorna posición actual [x, y, ang]"""
+        return [self.x, self.y, self.ang]
+    
+    def last_pos(self):
+        """Retorna posición anterior [last_x, last_y, last_ang]"""
+        return [self.last_x, self.last_y, self.last_ang]
+    
+    @property
+    def theta(self):
+        """Compatibilidad: alias para ang"""
+        return self.ang
+    
+    @theta.setter
+    def theta(self, value):
+        """Compatibilidad: setter para ang"""
+        self.ang = value
+    
+    def __repr__(self):
+        return f"Particle(x={self.x:.2f}, y={self.y:.2f}, ang={self.ang:.2f}, w={self.weight:.4f})"
+
+
+class ParticleFilterLocalization(Node):
     def __init__(self):
         super().__init__('particle_filter')
-        self.get_logger().info("Filtro de partículas para localización iniciado")
-
+        
         # Parámetros del filtro
-        self.num_particles = 500  # Número de partículas
-        self.sigma_hit = 0.2      # Desviación estándar del modelo de sensor (metros)
-        self.motion_noise = {
-            'alpha1': 0.01,  # Error de rotación debido a rotación
-            'alpha2': 0.01,  # Error de rotación debido a traslación
-            'alpha3': 0.01,  # Error de traslación debido a traslación
-            'alpha4': 0.01   # Error de traslación debido a rotación
-        }
+        self.declare_parameter('num_particles', 1000)
+        self.declare_parameter('alpha1', 0.2)  # Ruido en rotación por rotación
+        self.declare_parameter('alpha2', 0.2)  # Ruido en rotación por traslación  
+        self.declare_parameter('alpha3', 0.2)  # Ruido en traslación por traslación
+        self.declare_parameter('alpha4', 0.2)  # Ruido en traslación por rotación
+        self.declare_parameter('convergence_threshold', 0.5)  # Umbral de convergencia [m]
         
-        # Cargar mapa
-        self.map_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
-            'mapas', 'mapa.yaml'
-        )
-        self.load_map()
+        self.num_particles = self.get_parameter('num_particles').get_parameter_value().integer_value
+        self.alpha1 = self.get_parameter('alpha1').get_parameter_value().double_value
+        self.alpha2 = self.get_parameter('alpha2').get_parameter_value().double_value
+        self.alpha3 = self.get_parameter('alpha3').get_parameter_value().double_value
+        self.alpha4 = self.get_parameter('alpha4').get_parameter_value().double_value
+        self.convergence_threshold = self.get_parameter('convergence_threshold').get_parameter_value().double_value
         
-        # Inicializar partículas
+        # Variables del filtro
         self.particles = []
-        self.weights = np.ones(self.num_particles) / self.num_particles
-        self.initialize_particles_uniform()
-        
-        # Variables de estado
-        self.last_odom = None
-        self.latest_scan = None
+        self.map_data = None
+        self.map_info = None
+        self.current_scan = None
+        self.previous_odom = None
         self.initialized = False
         self.converged = False
-        self.convergence_threshold = 0.5  # metros
         
-        # Precalcular campo de verosimilitud
-        self.precompute_likelihood_field()
+        # Variables para el modelo de sensor
+        self.likelihood_field = None
+        self.sensor_model_ready = False
         
-        # Suscripciones
-        self.odom_sub = self.create_subscription(
-            Odometry, '/odom', self.odom_callback, 10
-        )
+        # Suscriptores
+        self.map_sub = self.create_subscription(
+            OccupancyGrid, '/map', self.map_callback, 1)
         self.scan_sub = self.create_subscription(
-            LaserScan, '/scan', self.scan_callback, 10
-        )
+            LaserScan, '/scan', self.scan_callback, 10)
+        self.odom_sub = self.create_subscription(
+            Odometry, '/odom', self.odom_callback, 10)
         
         # Publicadores
         self.particles_pub = self.create_publisher(
-            PoseArray, '/particle_cloud', 10
-        )
-        self.pose_pub = self.create_publisher(
-            PoseStamped, '/mcl_pose', 10
-        )
+            PoseArray, '/particles', 10)
+        self.estimated_pose_pub = self.create_publisher(
+            PoseStamped, '/estimated_pose', 10)
         self.convergence_pub = self.create_publisher(
-            Float32, '/particle_convergence', 10
-        )
+            Bool, '/localization_converged', 10)
+        self.markers_pub = self.create_publisher(
+            MarkerArray, '/particle_markers', 10)
         
-        # Timer para publicación periódica
-        self.create_timer(0.1, self.publish_particles)
-        self.create_timer(0.5, self.check_convergence)
+        # Timer para publicación de partículas
+        self.publish_timer = self.create_timer(0.5, self.publish_particles)
         
-        # Mutex para sincronización
-        self.lock = threading.Lock()
-
-    def load_map(self):
-        """Carga el mapa y prepara estructuras de datos"""
-        try:
-            with open(self.map_path, 'r') as f:
-                map_meta = yaml.safe_load(f)
-
-            self.resolution = map_meta['resolution']
-            self.origin = np.array(map_meta['origin'][:2])
-            
-            # Cargar imagen del mapa
-            image_path = os.path.join(os.path.dirname(self.map_path), map_meta['image'])
-            self.map_image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-            self.map_image = cv2.flip(self.map_image, 0)
-            
-            # Crear mapa binario: 0 = ocupado, 1 = libre
-            self.binary_map = (self.map_image > 250).astype(np.uint8)
-            self.height, self.width = self.binary_map.shape
-            
-            # Encontrar celdas libres para inicialización
-            self.free_cells = np.column_stack(np.where(self.binary_map == 1))
-            
-            # KD-Tree de obstáculos
-            obstacle_cells = np.column_stack(np.where(self.binary_map == 0))
-            if len(obstacle_cells) > 0:
-                self.obstacle_kdtree = KDTree(obstacle_cells)
-            
-            self.get_logger().info(
-                f"Mapa cargado: {self.width}x{self.height}, "
-                f"{len(self.free_cells)} celdas libres"
-            )
-            
-        except Exception as e:
-            self.get_logger().error(f"Error cargando mapa: {str(e)}")
-
-    def precompute_likelihood_field(self):
-        """Precalcula el campo de verosimilitud para eficiencia"""
-        self.get_logger().info("Precalculando campo de verosimilitud...")
+        self.get_logger().info(f"Filtro de partículas iniciado con {self.num_particles} partículas")
+    
+    def map_callback(self, msg):
+        """Procesa el mapa y inicializa las partículas"""
+        self.map_data = np.array(msg.data).reshape((msg.info.height, msg.info.width))
+        self.map_info = msg.info
         
-        self.likelihood_field = np.zeros((self.height, self.width))
-        sigma_pixels = self.sigma_hit / self.resolution
-        
-        # Para cada celda libre, calcular su verosimilitud
-        for y in range(self.height):
-            for x in range(self.width):
-                if self.binary_map[y, x] == 1:  # Celda libre
-                    dist, _ = self.obstacle_kdtree.query([y, x])
-                    self.likelihood_field[y, x] = exp(-0.5 * (dist / sigma_pixels) ** 2)
-        
-        # Normalizar
-        max_val = np.max(self.likelihood_field)
-        if max_val > 0:
-            self.likelihood_field /= max_val
-            
-        self.get_logger().info("Campo de verosimilitud calculado")
-
-    def initialize_particles_uniform(self):
-        """Inicializa partículas uniformemente en el espacio libre"""
+        if not self.initialized:
+            self.initialize_particles()
+            self.initialized = True
+            self.get_logger().info("Partículas inicializadas")
+    
+    def initialize_particles(self):
+        """Inicializa partículas uniformemente en el espacio libre del mapa"""
         self.particles = []
         
-        # Seleccionar celdas aleatorias
-        if len(self.free_cells) > 0:
-            indices = np.random.choice(len(self.free_cells), self.num_particles)
-            
-            for idx in indices:
-                y, x = self.free_cells[idx]
-                
-                # Convertir a coordenadas del mundo
-                wx = x * self.resolution + self.origin[0]
-                wy = y * self.resolution + self.origin[1]
-                wtheta = uniform(-pi, pi)
-                
-                particle = {
-                    'x': wx,
-                    'y': wy,
-                    'theta': wtheta,
-                    'weight': 1.0 / self.num_particles
-                }
-                self.particles.append(particle)
+        # Encontrar celdas libres en el mapa
+        free_cells = []
+        for y in range(self.map_info.height):
+            for x in range(self.map_info.width):
+                if self.map_data[y, x] == 0:  # Celda libre
+                    # Convertir a coordenadas del mundo
+                    world_x = self.map_info.origin.position.x + x * self.map_info.resolution
+                    world_y = self.map_info.origin.position.y + y * self.map_info.resolution
+                    free_cells.append((world_x, world_y))
         
-        self.get_logger().info(f"Inicializadas {self.num_particles} partículas")
-
-    def odom_callback(self, msg):
-        """Callback para odometría - aplica modelo de movimiento"""
-        with self.lock:
-            if self.last_odom is None:
-                self.last_odom = msg
-                return
+        if len(free_cells) == 0:
+            self.get_logger().error("No se encontraron celdas libres en el mapa")
+            return
+        
+        # Crear partículas en posiciones aleatorias
+        for i in range(self.num_particles):
+            # Seleccionar celda libre aleatoria
+            x, y = random.choice(free_cells)
             
-            # Calcular movimiento relativo
-            dx = msg.pose.pose.position.x - self.last_odom.pose.pose.position.x
-            dy = msg.pose.pose.position.y - self.last_odom.pose.pose.position.y
+            # Orientación aleatoria
+            ang = random.uniform(-math.pi, math.pi)
             
-            # Extraer orientaciones
-            q1 = self.last_odom.pose.pose.orientation
-            q2 = msg.pose.pose.orientation
-            _, _, yaw1 = euler_from_quaternion([q1.x, q1.y, q1.z, q1.w])
-            _, _, yaw2 = euler_from_quaternion([q2.x, q2.y, q2.z, q2.w])
+            # Crear partícula con sigma para ruido de movimiento
+            particle = Particle(x, y, ang, sigma=0.1)
+            particle.weight = 1.0 / self.num_particles
             
-            # Calcular rotaciones
-            delta_rot1 = atan2(dy, dx) - yaw1
-            delta_trans = sqrt(dx*dx + dy*dy)
-            delta_rot2 = yaw2 - yaw1 - delta_rot1
-            
-            # Normalizar ángulos
-            delta_rot1 = self.normalize_angle(delta_rot1)
-            delta_rot2 = self.normalize_angle(delta_rot2)
-            
-            # Aplicar modelo de movimiento a cada partícula
-            if delta_trans > 0.01 or abs(delta_rot1) > 0.01 or abs(delta_rot2) > 0.01:
-                self.apply_motion_model(delta_rot1, delta_trans, delta_rot2)
-            
-            self.last_odom = msg
-
-    def apply_motion_model(self, drot1, dtrans, drot2):
-        """
-        Aplica el modelo de movimiento probabilístico (sample_motion_model_odometry)
-        Algoritmo de Probabilistic Robotics, Table 5.6
-        """
-        for particle in self.particles:
-            # Agregar ruido al movimiento
-            drot1_hat = drot1 - self.sample_normal_distribution(
-                self.motion_noise['alpha1'] * abs(drot1) + 
-                self.motion_noise['alpha2'] * dtrans
-            )
-            
-            dtrans_hat = dtrans - self.sample_normal_distribution(
-                self.motion_noise['alpha3'] * dtrans + 
-                self.motion_noise['alpha4'] * (abs(drot1) + abs(drot2))
-            )
-            
-            drot2_hat = drot2 - self.sample_normal_distribution(
-                self.motion_noise['alpha1'] * abs(drot2) + 
-                self.motion_noise['alpha2'] * dtrans
-            )
-            
-            # Actualizar pose de la partícula
-            particle['x'] += dtrans_hat * cos(particle['theta'] + drot1_hat)
-            particle['y'] += dtrans_hat * sin(particle['theta'] + drot1_hat)
-            particle['theta'] += drot1_hat + drot2_hat
-            particle['theta'] = self.normalize_angle(particle['theta'])
-
+            self.particles.append(particle)
+        
+        self.get_logger().info(f"Inicializadas {len(self.particles)} partículas en {len(free_cells)} celdas libres")
+    
     def scan_callback(self, msg):
-        """Callback para datos del LIDAR"""
-        with self.lock:
-            self.latest_scan = msg
+        """Procesa nueva lectura láser y actualiza pesos de partículas"""
+        self.current_scan = msg
+        
+        if self.initialized and not self.converged:
+            self.update_particle_weights()
+            self.resample_particles()
+            self.check_convergence()
+    
+    def odom_callback(self, msg):
+        """Procesa odometría y predice movimiento de partículas"""
+        if not self.initialized:
+            return
+        
+        if self.previous_odom is not None:
+            # Calcular movimiento desde la última odometría
+            delta_x = msg.pose.pose.position.x - self.previous_odom.pose.pose.position.x
+            delta_y = msg.pose.pose.position.y - self.previous_odom.pose.pose.position.y
             
-            # Si tenemos scan, actualizar pesos y resamplear
-            if len(self.particles) > 0:
-                self.update_particle_weights(msg)
-                self.resample_particles()
-                self.estimate_pose()
-
-    def update_particle_weights(self, scan):
-        """
-        Actualiza los pesos de las partículas basado en la observación
-        Implementa el modelo de sensor Likelihood Fields
-        """
-        weights = []
+            # Obtener orientaciones
+            current_orientation = msg.pose.pose.orientation
+            prev_orientation = self.previous_odom.pose.pose.orientation
+            
+            _, _, current_yaw = euler_from_quaternion([
+                current_orientation.x, current_orientation.y, 
+                current_orientation.z, current_orientation.w])
+            _, _, prev_yaw = euler_from_quaternion([
+                prev_orientation.x, prev_orientation.y,
+                prev_orientation.z, prev_orientation.w])
+            
+            delta_theta = self.normalize_angle(current_yaw - prev_yaw)
+            
+            # Aplicar modelo de movimiento a todas las partículas
+            if abs(delta_x) > 0.01 or abs(delta_y) > 0.01 or abs(delta_theta) > 0.01:
+                self.predict_particles(delta_x, delta_y, delta_theta)
         
-        # Parámetros del scan
-        angle_min = scan.angle_min
-        angle_increment = scan.angle_increment
+        self.previous_odom = msg
+    
+    def predict_particles(self, delta_x, delta_y, delta_theta):
+        """
+        Aplica modelo de movimiento con ruido a todas las partículas
+        Usando el método move() de la clase Particle de la ayudantía
+        """
+        for particle in self.particles:
+            # Usar el método move() que ya incluye ruido gaussiano
+            particle.move(delta_x, delta_y, delta_theta)
+    
+    def update_particle_weights(self):
+        """Actualiza los pesos de las partículas basado en el modelo de sensor"""
+        if self.current_scan is None:
+            return
         
-        # Evaluar subconjunto de rayos para eficiencia
-        step = max(1, len(scan.ranges) // 30)
+        total_weight = 0.0
         
         for particle in self.particles:
-            weight = 1.0
-            
-            # Verificar si la partícula está en espacio libre
-            mx, my = self.world_to_map(particle['x'], particle['y'])
-            
-            if (mx < 0 or mx >= self.width or my < 0 or my >= self.height or 
-                self.binary_map[my, mx] == 0):
-                weight = 1e-10  # Peso muy pequeño para partículas en obstáculos
-            else:
-                # Calcular verosimilitud basada en el scan
-                for i in range(0, len(scan.ranges), step):
-                    z = scan.ranges[i]
-                    
-                    if z >= scan.range_max or np.isnan(z) or np.isinf(z):
-                        continue
-                    
-                    # Ángulo del rayo
-                    angle = angle_min + i * angle_increment
-                    
-                    # Punto final del rayo
-                    end_x = particle['x'] + z * cos(particle['theta'] + angle)
-                    end_y = particle['y'] + z * sin(particle['theta'] + angle)
-                    
-                    # Convertir a coordenadas del mapa
-                    end_mx, end_my = self.world_to_map(end_x, end_y)
-                    
-                    # Obtener verosimilitud del campo
-                    if (0 <= end_mx < self.width and 0 <= end_my < self.height):
-                        likelihood = self.likelihood_field[end_my, end_mx]
-                        weight *= (likelihood + 0.1)  # Evitar ceros
-            
-            weights.append(weight)
+            # Calcular likelihood usando modelo de sensor
+            likelihood = self.beam_range_finder_model(self.current_scan, particle)
+            particle.weight = likelihood
+            total_weight += likelihood
         
         # Normalizar pesos
-        weights = np.array(weights)
-        weight_sum = np.sum(weights)
-        
-        if weight_sum > 0:
-            self.weights = weights / weight_sum
+        if total_weight > 0:
+            for particle in self.particles:
+                particle.weight /= total_weight
         else:
-            self.weights = np.ones(self.num_particles) / self.num_particles
+            # Si todos los pesos son 0, asignar peso uniforme
+            uniform_weight = 1.0 / len(self.particles)
+            for particle in self.particles:
+                particle.weight = uniform_weight
+    
+    def beam_range_finder_model(self, scan, particle):
+        """
+        Implementa el modelo de sensor Likelihood Fields para una partícula
+        (Versión simplificada - en un sistema real se conectaría con sensor_model.py)
+        """
+        if self.map_data is None:
+            return 1e-6
         
-        # Actualizar pesos en partículas
-        for i, particle in enumerate(self.particles):
-            particle['weight'] = self.weights[i]
-
+        total_likelihood = 1.0
+        
+        # Procesar cada rayo del láser (submuestrear para eficiencia)
+        step = max(1, len(scan.ranges) // 20)  # Usar solo 20 rayos
+        
+        for i in range(0, len(scan.ranges), step):
+            range_val = scan.ranges[i]
+            
+            if range_val < scan.range_min or range_val > scan.range_max:
+                continue
+            
+            # Ángulo del rayo
+            beam_angle = scan.angle_min + i * scan.angle_increment
+            global_beam_angle = particle.ang + beam_angle  # Usar .ang en lugar de .theta
+            
+            # Punto final del rayo
+            end_x = particle.x + range_val * math.cos(global_beam_angle)
+            end_y = particle.y + range_val * math.sin(global_beam_angle)
+            
+            # Convertir a coordenadas del mapa
+            map_x = int((end_x - self.map_info.origin.position.x) / self.map_info.resolution)
+            map_y = int((end_y - self.map_info.origin.position.y) / self.map_info.resolution)
+            
+            # Verificar si está dentro del mapa
+            if (0 <= map_x < self.map_info.width and 0 <= map_y < self.map_info.height):
+                # Modelo simplificado: mayor likelihood cerca de obstáculos
+                if self.map_data[map_y, map_x] > 50:  # Cerca de obstáculo
+                    likelihood = 0.8
+                elif self.map_data[map_y, map_x] == 0:  # Espacio libre
+                    likelihood = 0.1
+                else:  # Desconocido
+                    likelihood = 0.05
+                
+                total_likelihood *= likelihood
+        
+        return max(total_likelihood, 1e-10)  # Evitar likelihood 0
+    
     def resample_particles(self):
-        """
-        Remuestreo de partículas usando Low Variance Resampling
-        Algoritmo de Probabilistic Robotics, Table 4.4
-        """
-        new_particles = []
-        
-        # Low variance resampling
-        M = self.num_particles
-        r = uniform(0, 1.0/M)
-        c = self.weights[0]
-        i = 0
-        
-        for m in range(M):
-            u = r + m * (1.0/M)
-            while u > c and i < M-1:
-                i += 1
-                c += self.weights[i]
-            
-            # Crear nueva partícula (copiar la seleccionada)
-            new_particle = {
-                'x': self.particles[i]['x'],
-                'y': self.particles[i]['y'],
-                'theta': self.particles[i]['theta'],
-                'weight': 1.0/M
-            }
-            
-            # Agregar pequeño ruido para diversidad
-            new_particle['x'] += normal(0, 0.01)
-            new_particle['y'] += normal(0, 0.01)
-            new_particle['theta'] += normal(0, 0.02)
-            new_particle['theta'] = self.normalize_angle(new_particle['theta'])
-            
-            new_particles.append(new_particle)
-        
-        self.particles = new_particles
-        self.weights = np.ones(M) / M
-
-    def estimate_pose(self):
-        """Estima la pose del robot basada en las partículas"""
+        """Remuestrea partículas usando rueda de la fortuna ponderada"""
         if len(self.particles) == 0:
             return
         
-        # Calcular media ponderada
-        x_mean = sum(p['x'] * p['weight'] for p in self.particles)
-        y_mean = sum(p['y'] * p['weight'] for p in self.particles)
+        # Calcular pesos acumulativos
+        weights = [p.weight for p in self.particles]
         
-        # Para la orientación, usar vectores para evitar problemas de discontinuidad
-        theta_x = sum(cos(p['theta']) * p['weight'] for p in self.particles)
-        theta_y = sum(sin(p['theta']) * p['weight'] for p in self.particles)
-        theta_mean = atan2(theta_y, theta_x)
+        # Verificar si hay pesos válidos
+        if sum(weights) == 0:
+            return
         
-        # Publicar pose estimada
-        pose_msg = PoseStamped()
-        pose_msg.header.frame_id = "map"
-        pose_msg.header.stamp = self.get_clock().now().to_msg()
-        pose_msg.pose.position.x = x_mean
-        pose_msg.pose.position.y = y_mean
-        pose_msg.pose.position.z = 0.0
+        # Remuestreo con rueda de la fortuna
+        new_particles = []
         
-        q = quaternion_from_euler(0, 0, theta_mean)
-        pose_msg.pose.orientation = Quaternion(x=q[0], y=q[1], z=q[2], w=q[3])
+        # Seleccionar partículas según sus pesos
+        for _ in range(self.num_particles):
+            # Selección estocástica universal
+            r = random.uniform(0, sum(weights))
+            cumulative_weight = 0
+            
+            for particle in self.particles:
+                cumulative_weight += particle.weight
+                if cumulative_weight >= r:
+                    # Crear copia de la partícula seleccionada usando constructor de ayudantía
+                    new_particle = Particle(particle.x, particle.y, particle.ang, sigma=particle.sigma)
+                    new_particle.weight = 1.0/self.num_particles
+                    new_particles.append(new_particle)
+                    break
         
-        self.pose_pub.publish(pose_msg)
-        
-        # Log periódico
-        if self.get_clock().now().nanoseconds % 1000000000 < 100000000:  # Cada segundo aprox
-            self.get_logger().info(
-                f"Pose estimada: x={x_mean:.3f}, y={y_mean:.3f}, θ={theta_mean:.3f}"
-            )
-
+        self.particles = new_particles
+    
     def check_convergence(self):
         """Verifica si el filtro ha convergido"""
         if len(self.particles) == 0:
             return
         
-        # Calcular varianza de las partículas
-        x_coords = [p['x'] for p in self.particles]
-        y_coords = [p['y'] for p in self.particles]
+        # Calcular dispersión de las partículas
+        positions = [(p.x, p.y) for p in self.particles]
+        center_x = sum(p[0] for p in positions) / len(positions)
+        center_y = sum(p[1] for p in positions) / len(positions)
         
-        x_var = np.var(x_coords)
-        y_var = np.var(y_coords)
+        # Calcular desviación estándar
+        variance = sum((p[0] - center_x)**2 + (p[1] - center_y)**2 for p in positions) / len(positions)
+        std_dev = math.sqrt(variance)
         
-        # Métrica de convergencia (desviación estándar promedio)
-        convergence = sqrt((x_var + y_var) / 2)
-        
-        # Publicar métrica
-        conv_msg = Float32()
-        conv_msg.data = convergence
-        self.convergence_pub.publish(conv_msg)
-        
-        # Verificar si ha convergido
-        if convergence < self.convergence_threshold and not self.converged:
+        # Verificar convergencia
+        if std_dev < self.convergence_threshold and not self.converged:
             self.converged = True
-            self.get_logger().info(
-                f"¡FILTRO CONVERGIDO! Desviación: {convergence:.3f} m"
-            )
+            self.get_logger().info(f"¡Filtro convergido! Dispersión: {std_dev:.3f} m")
+            self.get_logger().info(f"Pose estimada: x={center_x:.3f}, y={center_y:.3f}")
             
-            # Imprimir pose final
-            x_mean = np.mean(x_coords)
-            y_mean = np.mean(y_coords)
-            self.get_logger().info(
-                f"Localización completada en: x={x_mean:.3f}, y={y_mean:.3f}"
-            )
-
+            # Publicar convergencia
+            convergence_msg = Bool()
+            convergence_msg.data = True
+            self.convergence_pub.publish(convergence_msg)
+    
+    def get_estimated_pose(self):
+        """Calcula la pose estimada como promedio ponderado de las partículas"""
+        if len(self.particles) == 0:
+            return None
+        
+        # Calcular promedio ponderado
+        total_weight = sum(p.weight for p in self.particles)
+        if total_weight == 0:
+            return None
+        
+        x = sum(p.x * p.weight for p in self.particles) / total_weight
+        y = sum(p.y * p.weight for p in self.particles) / total_weight
+        
+        # Para el ángulo, usar promedio circular
+        sin_sum = sum(math.sin(p.ang) * p.weight for p in self.particles) / total_weight
+        cos_sum = sum(math.cos(p.ang) * p.weight for p in self.particles) / total_weight
+        theta = math.atan2(sin_sum, cos_sum)
+        
+        return (x, y, theta)
+    
     def publish_particles(self):
         """Publica las partículas para visualización en RViz"""
         if len(self.particles) == 0:
             return
         
+        # Publicar pose array de partículas
         pose_array = PoseArray()
         pose_array.header.frame_id = "map"
         pose_array.header.stamp = self.get_clock().now().to_msg()
         
         for particle in self.particles:
             pose = Pose()
-            pose.position.x = particle['x']
-            pose.position.y = particle['y']
+            pose.position.x = particle.x
+            pose.position.y = particle.y
             pose.position.z = 0.0
             
-            q = quaternion_from_euler(0, 0, particle['theta'])
-            pose.orientation = Quaternion(x=q[0], y=q[1], z=q[2], w=q[3])
+            # Convertir ángulo a quaternion
+            quat = quaternion_from_euler(0, 0, particle.ang)  # Usar .ang en lugar de .theta
+            pose.orientation.x = quat[0]
+            pose.orientation.y = quat[1]
+            pose.orientation.z = quat[2]
+            pose.orientation.w = quat[3]
             
             pose_array.poses.append(pose)
         
         self.particles_pub.publish(pose_array)
-
-    def world_to_map(self, x, y):
-        """Convierte coordenadas del mundo a índices del mapa"""
-        mx = int((x - self.origin[0]) / self.resolution)
-        my = int((y - self.origin[1]) / self.resolution)
-        return mx, my
-
+        
+        # Publicar pose estimada
+        estimated_pose = self.get_estimated_pose()
+        if estimated_pose:
+            pose_stamped = PoseStamped()
+            pose_stamped.header.frame_id = "map"
+            pose_stamped.header.stamp = self.get_clock().now().to_msg()
+            
+            pose_stamped.pose.position.x = estimated_pose[0]
+            pose_stamped.pose.position.y = estimated_pose[1]
+            pose_stamped.pose.position.z = 0.0
+            
+            quat = quaternion_from_euler(0, 0, estimated_pose[2])
+            pose_stamped.pose.orientation.x = quat[0]
+            pose_stamped.pose.orientation.y = quat[1]
+            pose_stamped.pose.orientation.z = quat[2]
+            pose_stamped.pose.orientation.w = quat[3]
+            
+            self.estimated_pose_pub.publish(pose_stamped)
+    
     def normalize_angle(self, angle):
-        """Normaliza un ángulo al rango [-pi, pi]"""
-        while angle > pi:
-            angle -= 2 * pi
-        while angle < -pi:
-            angle += 2 * pi
+        """Normaliza un ángulo al rango [-π, π]"""
+        while angle > math.pi:
+            angle -= 2 * math.pi
+        while angle < -math.pi:
+            angle += 2 * math.pi
         return angle
 
-    def sample_normal_distribution(self, variance):
-        """Muestrea de una distribución normal con media 0"""
-        return normal(0, sqrt(variance))
 
 def main(args=None):
     rclpy.init(args=args)
-    node = ParticleFilter()
     
     try:
+        node = ParticleFilterLocalization()
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
         node.destroy_node()
         rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()
