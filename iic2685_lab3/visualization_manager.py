@@ -30,6 +30,7 @@ class VisualizationManager(Node):
         self.get_logger().info("Gestor de visualización iniciado")
         
     def particles_callback(self, msg):
+        """Visualizar partículas como flechas"""
         marker_array = MarkerArray()
         
         # Limpiar markers anteriores
@@ -109,8 +110,10 @@ class VisualizationManager(Node):
         self.best_pose_marker_pub.publish(cylinder)
         
     def confidence_callback(self, msg):
+        """Actualizar confianza y mostrar estado"""
         self.confidence = msg.data
         
+        # Texto de estado
         marker = Marker()
         marker.header.frame_id = 'world_map'
         marker.header.stamp = self.get_clock().now().to_msg()
@@ -124,13 +127,13 @@ class VisualizationManager(Node):
         marker.pose.position.z = 0.5
         marker.pose.orientation.w = 1.0
         
-        status = "LOCALIZADO" if self.confidence > 0.8 else "Localizando..."
+        status = "LOCALIZADO" if self.confidence > 0.85 else "Localizando..."
         marker.text = f"Confianza: {self.confidence:.0%}\n{status}"
         
         marker.scale.z = 0.3
         
         # Color según confianza
-        if self.confidence > 0.8:
+        if self.confidence > 0.85:
             marker.color.r = 0.0
             marker.color.g = 1.0
         elif self.confidence > 0.5:

@@ -50,8 +50,10 @@ class ParticleFilter(Node):
         self.sensor_noise = 0.1
         self.motion_noise = [0.02, 0.02, 0.01]
         self.max_laser_range = 5.0
-        self.convergence_threshold = 0.8
-        self.likelihood_sigma = 0.2
+        self.convergence_threshold = 0.85  # Más alto para requerir mayor certeza
+        self.likelihood_sigma = 0.3  # Más alto para ser menos sensible
+        self.min_exploration_time = 10.0  # Tiempo mínimo antes de declarar localización
+        self.start_time = self.get_clock().now()
         
         # Estado
         self.particles = []
@@ -267,16 +269,23 @@ class ParticleFilter(Node):
             # Calcular y publicar confianza
             std_x = np.std([p.x for p in self.particles])
             std_y = np.std([p.y for p in self.particles])
-            confidence = np.exp(-5 * np.sqrt(std_x**2 + std_y**2))
+            # Hacer la confianza más conservadora
+            confidence = np.exp(-8 * np.sqrt(std_x**2 + std_y**2))  # Factor aumentado de 5 a 8
+            
+            # Considerar el tiempo transcurrido
+            elapsed_time = (self.get_clock().now() - self.start_time).nanoseconds / 1e9
+            if elapsed_time < self.min_exploration_time:
+                confidence *= 0.5  # Reducir confianza si no ha explorado suficiente
             
             conf_msg = Float64()
             conf_msg.data = confidence
             self.confidence_pub.publish(conf_msg)
             
             # Verificar localización
-            if confidence > self.convergence_threshold and not self.localized:
+            if confidence > self.convergence_threshold and not self.localized and elapsed_time > self.min_exploration_time:
                 self.localized = True
                 self.get_logger().info(f"¡Localizado! Pose: ({x_mean:.2f}, {y_mean:.2f}, {theta_mean:.2f})")
+                self.get_logger().info(f"Tiempo de exploración: {elapsed_time:.1f}s")
                 
 
 def main(args=None):
