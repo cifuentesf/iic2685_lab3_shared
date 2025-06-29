@@ -39,6 +39,13 @@ class ReactiveNavigator(Node):
         
     def laser_callback(self, msg):
         self.current_scan = msg
+        valid_ranges = [r for r in msg.ranges if not (np.isinf(r) or np.isnan(r))]
+        
+        if not valid_ranges:
+            self.get_logger().warn("LIDAR scan vacío o inválido!")
+        else:
+            min_range = min(valid_ranges)
+            self.get_logger().debug(f"Scan recibido. Rango mínimo: {min_range:.2f}m")
         
     def confidence_callback(self, msg):
         if msg.data > self.intervalo_confianza and self.exploring:
@@ -81,10 +88,8 @@ class ReactiveNavigator(Node):
             'left': np.min(ranges[left_start:]) if left_start < n else self.current_scan.range_max
         }
         
-        # Crear comando de velocidad
         cmd = Twist()
         
-        # Verificar si hay obstáculo frontal
         if regions['front'] < self.min_front_distance:
             # Obstáculo adelante - solo girar
             cmd.linear.x = 0.0
@@ -95,32 +100,31 @@ class ReactiveNavigator(Node):
                 cmd.angular.z = -self.angular_speed  # Girar a la derecha
             
             self.get_logger().debug(f"Obstáculo frontal detectado. Girando.")
-            
+
         else:
-            # Camino libre adelante - navegar
+            # Navegar
             cmd.linear.x = self.linear_speed
             
-            # Lógica de seguimiento de pared derecha
-            if regions['right'] < self.current_scan.range_max * 0.9:  # Hay pared a la derecha
+            # Detección
+            wall_detected = regions['right'] < self.current_scan.range_max * 0.9
+            
+            if wall_detected:
                 # Control proporcional para mantener distancia
                 error = regions['right'] - self.wall_distance
-                kp = 2.5  # Ganancia proporcional
-                
-                # Calcular velocidad angular
-                cmd.angular.z = -kp * error  # Negativo porque queremos acercarnos si está lejos
-                
-                # Limitar velocidad angular
+                kp = 2.5
+                cmd.angular.z = -kp * error
                 cmd.angular.z = np.clip(cmd.angular.z, -self.angular_speed, self.angular_speed)
                 
-                # Si está muy cerca de la pared, reducir velocidad lineal
                 if regions['right'] < self.wall_distance * 0.7:
                     cmd.linear.x *= 0.5
-                    
             else:
-                # No hay pared a la derecha - girar suavemente a la derecha para buscarla
-                cmd.angular.z = -self.angular_speed * 0.3
-                cmd.linear.x *= 0.7  # Reducir velocidad mientras busca pared
+                # Comportamiento más agresivo para buscar pared
+                cmd.angular.z = -self.angular_speed * 0.5  # Giro más pronunciado
+                cmd.linear.x = self.linear_speed * 0.8
                 
+                # Intensificar la búsqueda si no encuentra pared después de un tiempo
+                if regions['front'] > self.min_front_distance * 2:
+                    cmd.angular.z *= 1.5    
         # Debug
         self.get_logger().debug(
             f"Distancias - F:{regions['front']:.2f} R:{regions['right']:.2f} L:{regions['left']:.2f} | "
