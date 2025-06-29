@@ -1,259 +1,351 @@
 #!/usr/bin/env python3
 """
-Modelo del Sensor - Likelihood Fields
-Implementación del modelo de sensor basado en campos de verosimilitud para localización
+Actividad 1: Modelo del Sensor Likelihood Fields
+Implementa el modelo de sensor basado en campos de verosimilitud
+como se describe en el capítulo 4.2 del libro y el laboratorio 3.
 """
 import rclpy
 from rclpy.node import Node
 import numpy as np
 import cv2
-from scipy.spatial import KDTree
+import math
+from scipy import spatial
 from scipy.stats import norm
 from sensor_msgs.msg import LaserScan
-from nav_msgs.msg import OccupancyGrid
-from geometry_msgs.msg import Pose, PoseStamped
-from visualization_msgs.msg import MarkerArray, Marker
-import math
+from geometry_msgs.msg import Pose, Vector3, Twist
+from nav_msgs.msg import OccupancyGrid, Odometry
+from std_msgs.msg import Bool
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+import yaml
+import os
+from ament_index_python.packages import get_package_share_directory
+from sklearn.metrics import mean_squared_error
+from tf_transformations import euler_from_quaternion
+from math import pi, atan2, sqrt, cos, sin
+import time
 
 
-class SensorModel(Node):
+
+class LikelihoodFields(Node):
     def __init__(self):
-        super().__init__('sensor_model')
-        
+        super().__init__('likelihood_fields')
+
         # Parámetros del modelo
-        self.declare_parameter('sigma_hit', 0.2)  # Desviación estándar para Phit
-        self.declare_parameter('z_max', 5.0)     # Rango máximo del sensor
-        self.declare_parameter('likelihood_field_resolution', 0.05)  # Resolución del campo
+        self.sigma_hit = 0.2  # Desviación estándar de la distribución gaussiana
+        self.z_max = 4.0  # Rango máximo del sensor
+        self.likelihood_field_resolution = 0.01  # Resolución del campo de verosimilitud
         
-        self.sigma_hit = self.get_parameter('sigma_hit').get_parameter_value().double_value
-        self.z_max = self.get_parameter('z_max').get_parameter_value().double_value
-        self.resolution = self.get_parameter('likelihood_field_resolution').get_parameter_value().double_value
-        
-        # Variables del mapa
-        self.map_data = None
-        self.map_info = None
-        self.obstacles = []
-        self.kd_tree = None
-        self.likelihood_field = None
-        
+        # Parametros Robot
+        self.robot_pose = None
+        self.latest_scan = None
+        self.running = True
+
         # Suscriptores
-        self.map_sub = self.create_subscription(
-            OccupancyGrid, '/map', self.map_callback, 1)
-        self.scan_sub = self.create_subscription(
-            LaserScan, '/scan', self.scan_callback, 10)
-        self.pose_sub = self.create_subscription(
-            PoseStamped, '/test_pose', self.test_pose_callback, 10)
-        
+        self.laser_sub = self.create_subscription(LaserScan, '/scan', self.laser_callback, 10)
+        self.pose_sub = self.create_subscription(Pose, '/real_pose', self.pose_callback, 10)
+        self.sub_odom = self.create_subscription(Odometry, "/odom", self.odom_callback, 10)
+
+
         # Publicadores
-        self.likelihood_map_pub = self.create_publisher(
-            OccupancyGrid, '/likelihood_map', 10)
-        self.markers_pub = self.create_publisher(
-            MarkerArray, '/likelihood_markers', 10)
+        self.likelihood_pub = self.create_publisher(OccupancyGrid, '/map_state', 10)
+        self.state_pub = self.create_publisher(Bool, '/bot_state', 10)
         
-        self.get_logger().info("Modelo del sensor iniciado")
-    
-    def map_callback(self, msg):
-        """Callback para recibir el mapa y calcular el campo de verosimilitud"""
-        self.get_logger().info("Mapa recibido, calculando campo de verosimilitud...")
+        # Cargar mapa y precalcular campos de verosimilitud
+        self.load_map()
+        self.compute_likelihood_field()
         
-        self.map_info = msg.info
-        self.map_data = np.array(msg.data).reshape(
-            (msg.info.height, msg.info.width))
+        self.get_logger().info('Modelo de sensor Likelihood Fields inicializado')
+
+        #Timers
+        self.control_timer = self.create_timer(1.0, self.control_loop)
+
+    def load_map(self):
+        """Carga el mapa desde los archivos mapa.pgm y mapa.yaml"""
+        pkg_share = get_package_share_directory('iic2685_lab3')
+        map_path = os.path.join(pkg_share, 'maps', 'mapa.pgm')
+        yaml_path = os.path.join(pkg_share, 'maps', 'mapa.yaml')
+        
+        self.map_image = cv2.imread(map_path, cv2.IMREAD_GRAYSCALE)
+        if self.map_image is None:
+            self.get_logger().error(f'No se pudo cargar el mapa: {map_path}')
+            return
+        
+        with open(yaml_path, 'r') as f:
+            map_metadata = yaml.safe_load(f)
+        
+        self.map_resolution = map_metadata['resolution']  # metros/pixel
+        self.map_origin = map_metadata['origin']  # [x, y, theta]
+        
+        # 0 = obstáculo, 255 = libre
+        self.map_data = 255 - self.map_image
         
         # Extraer coordenadas de obstáculos
         self.extract_obstacles()
         
-        # Construir KD-Tree para búsqueda eficiente
-        if self.obstacles:
-            self.kd_tree = KDTree(self.obstacles)
-            
-            # Pre-calcular campo de verosimilitud
-            self.compute_likelihood_field()
-            
-            # Publicar campo de verosimilitud como mapa
-            self.publish_likelihood_map()
-            
-            self.get_logger().info("Campo de verosimilitud calculado exitosamente")
-        else:
-            self.get_logger().warn("No se encontraron obstáculos en el mapa")
+        self.get_logger().info(f'Mapa cargado: {self.map_image.shape}, resolución: {self.map_resolution}')
+    
+
+    def compute_likehood_field(self):
+        pass
+    
+    def control_loop(self):
+        pass
+        if 
+
+
+    #Callback
+    def laser_callback(self, msg):
+        """Callback para actualizar la última medición del láser"""
+        self.latest_scan = msg
+    
+    def pose_callback(self, msg):
+        """Callback para actualizar la pose del robot"""
+        self.current_robot_pose = (msg.position.x, msg.position.y)
+
+    def odom_callback(self, msg):
+        '''Callback para odometría del robot'''
+        orientation_q = msg.pose.pose.orientation
+        orientation_list = [orientation_q.x, orientation_q.y, orientation_q.z, orientation_q.w]
+        (_, _, yaw) = euler_from_quaternion(orientation_list)
+        self.current_robot_orientation = yaw
+
+class LikelihoodFieldsSensorModel(Node):
+    def __init__(self):
+        super().__init__('likelihood_fields_sensor_model')
+
+        #Parametros
+        self.sigma_hit = 0.2 # Desviación estándar
+        self.z_max = 4.0 # Rango máximo del sensor
+        self.likelihood_field_resolution = 0.01 # Resolución del campo
+        
+        # Suscriptores
+        self.laser_sub = self.create_subscription(LaserScan, '/scan', self.laser_callback, 10)
+        self.pose_sub = self.create_subscription(Pose, '/real_pose', self.pose_callback, 10)
+
+        # Publicadores
+        #self.map_pub = self.create_publisher(OccupancyGrid, '/map', 10)
+
+        # Estado del robot
+        self.robot_pose = None
+        self.latest_scan = None
+        
+        # Fns auxiliares
+        # Cargar mapa
+        self.load_map()
+        # Precalcular campos de verosimilitud
+        self.compute_likelihood_field()
+        
+        # Timer
+        self.vis_timer = self.create_timer(1.0, self.visualize_likelihood)
+        
+        self.get_logger().info('Modelo de sensor Likelihood Fields inicializado')
+    
+    def load_map(self):
+        """Carga el mapa desde los archivos mapa.pgm y mapa.yaml"""
+        pkg_share = get_package_share_directory('iic2685_lab3')
+        map_path = os.path.join(pkg_share, 'maps', 'mapa.pgm')
+        yaml_path = os.path.join(pkg_share, 'maps', 'mapa.yaml')
+        
+        self.map_image = cv2.imread(map_path, cv2.IMREAD_GRAYSCALE)
+        if self.map_image is None:
+            self.get_logger().error(f'No se pudo cargar el mapa: {map_path}')
+            return
+        
+        with open(yaml_path, 'r') as f:
+            map_metadata = yaml.safe_load(f)
+        
+        self.map_resolution = map_metadata['resolution']  # metros/pixel
+        self.map_origin = map_metadata['origin']  # [x, y, theta]
+        
+        # 0 = obstáculo, 255 = libre
+        self.map_data = 255 - self.map_image
+        
+        # Extraer coordenadas de obstáculos
+        self.extract_obstacles()
+        
+        self.get_logger().info(f'Mapa cargado: {self.map_image.shape}, resolución: {self.map_resolution}')
     
     def extract_obstacles(self):
-        """Extrae las coordenadas métricas de los obstáculos del mapa"""
-        self.obstacles = []
+        """Extrae las coordenadas de los obstáculos del mapa"""
+        obstacle_pixels = np.where(self.map_data > 200)
         
-        for i in range(self.map_info.height):
-            for j in range(self.map_info.width):
-                # Si la celda está ocupada (valor > 65)
-                if self.map_data[i, j] > 65:
-                    # Convertir a coordenadas métricas
-                    x = j * self.map_info.resolution + self.map_info.origin.position.x
-                    y = i * self.map_info.resolution + self.map_info.origin.position.y
-                    self.obstacles.append([x, y])
+        self.obstacle_coords = []
+        for i in range(len(obstacle_pixels[0])):
+            # Píxeles (fila, columna)
+            row = obstacle_pixels[0][i]
+            col = obstacle_pixels[1][i]
+            
+            x = col * self.map_resolution + self.map_origin[0]
+            y = (self.map_image.shape[0] - row - 1) * self.map_resolution + self.map_origin[1]
+            
+            self.obstacle_coords.append([x, y])
+        
+        self.obstacle_coords = np.array(self.obstacle_coords)
+        
+        self.obstacle_tree = spatial.KDTree(self.obstacle_coords)
+        
+        self.get_logger().info(f'Extraídos {len(self.obstacle_coords)} puntos de obstáculos')
     
     def compute_likelihood_field(self):
-        """Pre-calcula el campo de verosimilitud para todo el mapa"""
-        # Crear grid de verosimilitud
-        width = int(self.map_info.width * self.map_info.resolution / self.resolution)
-        height = int(self.map_info.height * self.map_info.resolution / self.resolution)
+        """Precalcula el campo de verosimilitud para todo el mapa"""
+        self.get_logger().info('Calculando campo de verosimilitud...')
         
-        self.likelihood_field = np.zeros((height, width))
+        # Crear grid para el campo de verosimilitud
+        height, width = self.map_image.shape
+        self.likelihood_field = np.zeros((height, width), dtype=np.float32)
         
-        # Para cada celda del campo
-        for i in range(height):
-            for j in range(width):
-                # Coordenadas métricas
-                x = j * self.resolution + self.map_info.origin.position.x
-                y = i * self.resolution + self.map_info.origin.position.y
+        # Para cada píxel del mapa
+        for row in range(height):
+            for col in range(width):
+                # Convertir a coordenadas métricas
+                x = col * self.map_resolution + self.map_origin[0]
+                y = (height - row - 1) * self.map_resolution + self.map_origin[1]
                 
                 # Encontrar distancia al obstáculo más cercano
-                if self.kd_tree:
-                    dist, _ = self.kd_tree.query([x, y])
-                    
-                    # Calcular probabilidad usando distribución normal
-                    prob = norm.pdf(dist, loc=0, scale=self.sigma_hit)
-                    self.likelihood_field[i, j] = prob
+                dist, _ = self.obstacle_tree.query([x, y])
+                
+                # Calcular verosimilitud usando distribución gaussiana
+                likelihood = norm.pdf(dist, loc=0, scale=self.sigma_hit)
+                self.likelihood_field[row, col] = likelihood
+        
+        # Normalizar el campo
+        max_likelihood = np.max(self.likelihood_field)
+        if max_likelihood > 0:
+            self.likelihood_field /= max_likelihood
+        
+        self.get_logger().info('Campo de verosimilitud calculado')
     
-    def sensor_model_likelihood_field(self, z_t, x_t, map_data):
+    def measurement_model(self, z_t, x_t, map_data=None):
         """
-        Calcula P(z_t | x_t, m) usando el modelo de likelihood fields
+        Implementa P(z_t | x_t, m) usando Likelihood Fields
         
         Args:
             z_t: Medición del láser (LaserScan)
             x_t: Pose hipotética del robot [x, y, theta]
-            map_data: Mapa del entorno
+            map_data: Mapa (no usado aquí, pero incluido por compatibilidad)
         
         Returns:
-            q: Verosimilitud de la medición
+            Probabilidad P(z_t | x_t, m)
         """
-        if self.kd_tree is None or z_t is None:
+        if z_t is None:
             return 0.0
         
+        # Probabilidad acumulada
         q = 1.0
         
-        # Para cada rayo del láser
-        for k, z_k in enumerate(z_t.ranges):
-            # Ignorar mediciones inválidas
-            if z_k >= self.z_max or z_k <= z_t.range_min or math.isnan(z_k):
+        # Número de rayos a considerar (subsample para eficiencia)
+        step = max(1, len(z_t.ranges) // 30)  # Usar ~30 rayos
+        
+        for k in range(0, len(z_t.ranges), step):
+            if z_t.ranges[k] <= z_t.range_min or z_t.ranges[k] >= z_t.range_max:
                 continue
             
-            # Calcular ángulo del rayo
+            # Ángulo del rayo k
             angle = z_t.angle_min + k * z_t.angle_increment
             
-            # Posición del punto final del rayo
-            x_zk = x_t[0] + z_k * math.cos(x_t[2] + angle)
-            y_zk = x_t[1] + z_k * math.sin(x_t[2] + angle)
+            # Punto final del rayo en coordenadas globales
+            x_zk = x_t[0] + z_t.ranges[k] * math.cos(x_t[2] + angle)
+            y_zk = x_t[1] + z_t.ranges[k] * math.sin(x_t[2] + angle)
             
-            # Encontrar distancia al obstáculo más cercano
-            dist, _ = self.kd_tree.query([x_zk, y_zk])
+            # Buscar distancia al obstáculo más cercano
+            dist, _ = self.obstacle_tree.query([x_zk, y_zk])
             
-            # Calcular probabilidad
-            prob = norm.pdf(dist, loc=0, scale=self.sigma_hit)
-            q *= prob
+            # Calcular p_hit usando distribución gaussiana
+            p_hit = norm.pdf(dist, loc=0, scale=self.sigma_hit)
+            
+            # Actualizar probabilidad acumulada
+            q *= p_hit
         
         return q
     
-    def scan_callback(self, msg):
-        """Callback para recibir datos del láser"""
-        # Guardar para uso posterior
-        self.current_scan = msg
+    def get_likelihood_at_pose(self, x, y, theta=0.0):
+        """
+        Obtiene la verosimilitud en una pose específica
+        Usado para visualización
+        """
+        if self.latest_scan is None:
+            return 0.0
+        
+        return self.measurement_model(self.latest_scan, [x, y, theta])
     
-    def test_pose_callback(self, msg):
-        """Callback para probar el modelo con una pose específica"""
-        if self.current_scan and self.kd_tree:
-            pose = [msg.pose.position.x, 
-                   msg.pose.position.y,
-                   self.get_yaw_from_quaternion(msg.pose.orientation)]
-            
-            likelihood = self.sensor_model_likelihood_field(
-                self.current_scan, pose, self.map_data)
-            
-            self.get_logger().info(f"Verosimilitud en pose ({pose[0]:.2f}, {pose[1]:.2f}, {pose[2]:.2f}): {likelihood:.6f}")
+    def laser_callback(self, msg):
+        """Callback para actualizar la última medición del láser"""
+        self.latest_scan = msg
     
-    def get_yaw_from_quaternion(self, q):
-        """Extrae el ángulo yaw de un quaternion"""
-        siny_cosp = 2 * (q.w * q.z + q.x * q.y)
-        cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
-        return math.atan2(siny_cosp, cosy_cosp)
+    def pose_callback(self, msg):
+        """Callback para actualizar la pose del robot"""
+        # Extraer orientación (asumiendo que es 2D)
+        theta = 2 * math.atan2(msg.orientation.z, msg.orientation.w)
+        self.robot_pose = [msg.position.x, msg.position.y, theta]
     
-    def publish_likelihood_map(self):
-        """Publica el campo de verosimilitud como un OccupancyGrid para visualización"""
-        if self.likelihood_field is None:
+    def visualize_likelihood(self):
+        """Visualiza el campo de verosimilitud con la pose actual del robot"""
+        if self.robot_pose is None or self.latest_scan is None:
             return
         
-        # Normalizar el campo para visualización
-        field_normalized = (self.likelihood_field / np.max(self.likelihood_field) * 100).astype(int)
+        # Crear figura
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
         
-        # Crear mensaje OccupancyGrid
-        likelihood_map = OccupancyGrid()
-        likelihood_map.header.frame_id = "map"
-        likelihood_map.header.stamp = self.get_clock().now().to_msg()
+        # Mostrar mapa original
+        ax1.imshow(self.map_image, cmap='gray', origin='lower')
+        ax1.set_title('Mapa Original')
+        ax1.set_xlabel('X (píxeles)')
+        ax1.set_ylabel('Y (píxeles)')
         
-        # Copiar info del mapa original pero ajustar resolución
-        likelihood_map.info = self.map_info
-        likelihood_map.info.resolution = self.resolution
-        likelihood_map.info.width = self.likelihood_field.shape[1]
-        likelihood_map.info.height = self.likelihood_field.shape[0]
+        # Calcular verosimilitud para la pose actual
+        height, width = self.map_image.shape
+        likelihood_map = np.zeros((height, width))
         
-        # Aplanar y convertir a lista
-        likelihood_map.data = field_normalized.flatten().tolist()
+        # Muestrear poses con ángulo 0
+        sample_step = 5  # Muestrear cada 5 píxeles
+        for row in range(0, height, sample_step):
+            for col in range(0, width, sample_step):
+                # Solo calcular para celdas libres
+                if self.map_data[row, col] < 100:
+                    x = col * self.map_resolution + self.map_origin[0]
+                    y = (height - row - 1) * self.map_resolution + self.map_origin[1]
+                    
+                    likelihood = self.get_likelihood_at_pose(x, y, 0.0)
+                    likelihood_map[row, col] = likelihood
         
-        self.likelihood_map_pub.publish(likelihood_map)
-    
-    def visualize_likelihood_at_poses(self, poses):
-        """
-        Visualiza la verosimilitud en un conjunto de poses hipotéticas
-        Para cumplir con el entregable de la actividad 1
-        """
-        if self.current_scan is None or self.kd_tree is None:
-            return
+        # Mostrar campo de verosimilitud
+        im = ax2.imshow(likelihood_map, cmap='hot', origin='lower', alpha=0.8)
+        ax2.imshow(self.map_image, cmap='gray', origin='lower', alpha=0.3)
         
-        markers = MarkerArray()
+        # Marcar posición actual del robot
+        if self.robot_pose:
+            robot_col = int((self.robot_pose[0] - self.map_origin[0]) / self.map_resolution)
+            robot_row = height - 1 - int((self.robot_pose[1] - self.map_origin[1]) / self.map_resolution)
+            ax2.plot(robot_col, robot_row, 'bo', markersize=10, label='Robot')
         
-        for i, (x, y) in enumerate(poses):
-            # Calcular verosimilitud para pose con theta=0
-            pose = [x, y, 0.0]
-            likelihood = self.sensor_model_likelihood_field(
-                self.current_scan, pose, self.map_data)
-            
-            # Crear marcador
-            marker = Marker()
-            marker.header.frame_id = "map"
-            marker.header.stamp = self.get_clock().now().to_msg()
-            marker.id = i
-            marker.type = Marker.CUBE
-            marker.action = Marker.ADD
-            
-            marker.pose.position.x = x
-            marker.pose.position.y = y
-            marker.pose.position.z = 0.0
-            
-            marker.scale.x = self.map_info.resolution
-            marker.scale.y = self.map_info.resolution
-            marker.scale.z = 0.1
-            
-            # Color basado en verosimilitud
-            marker.color.a = 0.5
-            marker.color.r = likelihood * 100
-            marker.color.g = 0.0
-            marker.color.b = 1.0 - (likelihood * 100)
-            
-            markers.markers.append(marker)
+        ax2.set_title('Campo de Verosimilitud P(z|x,m)')
+        ax2.set_xlabel('X (píxeles)')
+        ax2.set_ylabel('Y (píxeles)')
+        ax2.legend()
         
-        self.markers_pub.publish(markers)
+        plt.colorbar(im, ax=ax2, label='Verosimilitud')
+        plt.tight_layout()
+        
+        # Guardar figura
+        save_path = '/tmp/likelihood_field_vis.png'
+        plt.savefig(save_path)
+        plt.close()
+        
+        self.get_logger().info(f'Visualización guardada en: {save_path}')
 
 
 def main(args=None):
     rclpy.init(args=args)
-    
-    sensor_model = SensorModel()
+    node = LikelihoodFieldsSensorModel()
     
     try:
-        rclpy.spin(sensor_model)
+        rclpy.spin(node)
     except KeyboardInterrupt:
         pass
-    finally:
-        sensor_model.destroy_node()
-        rclpy.shutdown()
+    
+    node.destroy_node()
+    rclpy.shutdown()
 
 
 if __name__ == '__main__':

@@ -7,26 +7,25 @@
   <maintainer email="mcifuentesf@todo.todo">mcifuentesf</maintainer>
   <license>TODO: License declaration</license>
 
-  <buildtool_depend>ament_python</buildtool_depend>
 
+  <buildtool_depend>ament_python</buildtool_depend>
 
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
-  <depend>sensor_msgs</depend>
   <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>visualization_msgs</depend>
   <depend>tf_transformations</depend>
-  <depend>tf2_ros</depend>
+
+  <depend>very_simple_robot_simulator</depend>
   
+  <!-- Python dependencies -->
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-opencv</exec_depend>
   <exec_depend>python3-scipy</exec_depend>
   <exec_depend>python3-matplotlib</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
-  <exec_depend>very_simple_robot_simulator</exec_depend>
-  <exec_depend>ayudantia_rviz</exec_depend>
-  <exec_depend>rviz2</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
