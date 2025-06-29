@@ -36,7 +36,7 @@
   <node pkg="iic2685_lab3" exec="particle_filter.py" name="particle_filter" output="screen" />
   
   <!-- Navegación -->
-  <node pkg="iic2685_lab3" exec="navigator.py" name="navigator" output="screen" />
+  <node pkg="iic2685_lab3" exec="navigator.py" name="reactive_navigator" output="screen" />
   
   <!-- Visualizador -->
   <node pkg="iic2685_lab3" exec="visualization_manager.py" name="visualization_manager" output="screen"/>
