@@ -3,285 +3,286 @@
 import rclpy
 from rclpy.node import Node
 import numpy as np
-import math
+import cv2
 from scipy.spatial import KDTree
-from random import gauss, uniform, randint
+from scipy.stats import norm
 
 from sensor_msgs.msg import LaserScan
-from geometry_msgs.msg import PoseArray, Pose, PointStamped
+from geometry_msgs.msg import PoseArray, Pose, PointStamped, Quaternion
 from nav_msgs.msg import OccupancyGrid, Odometry
 from std_msgs.msg import Float64
+from tf_transformations import quaternion_from_euler, euler_from_quaternion
+
 
 class Particle:
-    def __init__(self, x, y, ang, sigma=0.1):
-        self.x, self.y, self.ang = x, y, ang
-        self.last_x, self.last_y, self.last_ang = x, y, ang
-        self.sigma = sigma
-        self.weight = 1.0
+    def __init__(self, x, y, theta, weight=1.0):
+        self.x = x
+        self.y = y
+        self.theta = theta
+        self.weight = weight
+        
+    def move(self, dx, dy, dtheta, motion_noise):
+        """Aplicar modelo de movimiento con ruido Gaussiano"""
+        self.x += dx + np.random.normal(0, motion_noise[0])
+        self.y += dy + np.random.normal(0, motion_noise[1])
+        self.theta += dtheta + np.random.normal(0, motion_noise[2])
+        # Normalizar ángulo
+        self.theta = np.arctan2(np.sin(self.theta), np.cos(self.theta))
+        
+    def to_pose(self):
+        """Convertir partícula a mensaje Pose"""
+        pose = Pose()
+        pose.position.x = self.x
+        pose.position.y = self.y
+        pose.position.z = 0.0
+        
+        q = quaternion_from_euler(0, 0, self.theta)
+        pose.orientation = Quaternion(x=q[0], y=q[1], z=q[2], w=q[3])
+        return pose
 
-    def move(self, dx, dy, dtheta):
-        self.last_x, self.last_y, self.last_ang = self.x, self.y, self.ang
-        self.x += dx + gauss(0, self.sigma)
-        self.y += dy + gauss(0, self.sigma)
-        self.ang += dtheta + gauss(0, self.sigma)
-
-    def pos(self):
-        return [self.x, self.y, self.ang]
-
-    def last_pos(self):
-        return [self.last_x, self.last_y, self.last_ang]
 
 class ParticleFilter(Node):
     def __init__(self):
         super().__init__('particle_filter')
         
-        # Parámetros del filtro
+        # Parámetros internos
         self.num_particles = 1000
         self.sensor_noise = 0.1
-        self.max_laser_range = 4.0
-
-        # Estado del filtro
+        self.motion_noise = [0.02, 0.02, 0.01]
+        self.max_laser_range = 5.0
+        self.convergence_threshold = 0.8
+        self.likelihood_sigma = 0.2
+        
+        # Estado
         self.particles = []
         self.map_data = None
-        self.map_resolution = None
-        self.map_origin = None
-        self.obstacle_coords = []
-
-        # Estado del robot
+        self.map_info = None
+        self.likelihood_field = None
+        self.kdtree = None
         self.current_scan = None
-        self.previous_pose = None
+        self.previous_odom = None
         self.localized = False
-
+        
         # Suscriptores
         self.create_subscription(LaserScan, '/scan', self.laser_callback, 10)
-        self.create_subscription(OccupancyGrid, '/map', self.map_callback, 10)
+        self.create_subscription(OccupancyGrid, '/world_map', self.map_callback, 10)
         self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
-
+        
         # Publicadores
         self.particles_pub = self.create_publisher(PoseArray, '/particles', 10)
         self.best_pose_pub = self.create_publisher(PointStamped, '/best_pose', 10)
         self.confidence_pub = self.create_publisher(Float64, '/localization_confidence', 10)
-
-        # Timer principal del filtro
-        self.create_timer(0.1, self.particle_filter_step)
+        
+        # Timer
+        self.create_timer(0.1, self.update_filter)
         
         self.get_logger().info("Filtro de partículas iniciado")
-
+        
     def map_callback(self, msg):
-        """Callback para recibir el mapa y inicializar partículas"""
-        self.get_logger().info("Mapa recibido")
+        """Procesar mapa y crear likelihood field"""
+        self.map_info = msg.info
+        self.map_data = np.array(msg.data).reshape((msg.info.height, msg.info.width))
         
-        self.map_resolution = msg.info.resolution
-        self.map_origin = [msg.info.origin.position.x, msg.info.origin.position.y]
-        data = np.array(msg.data).reshape((msg.info.height, msg.info.width))
-        self.map_data = data
-
-        self.obstacle_coords = [
-            [self.map_origin[0] + x * self.map_resolution,
-             self.map_origin[1] + y * self.map_resolution]
-            for y in range(data.shape[0]) for x in range(data.shape[1])
-            if data[y, x] > 50
-        ]
-
-        # Celdas libres
-        free_cells = [
-            [self.map_origin[0] + x * self.map_resolution,
-             self.map_origin[1] + y * self.map_resolution]
-            for y in range(data.shape[0]) for x in range(data.shape[1])
-            if data[y, x] == 0
-        ]
-
-        # Inicializar partículas
-        if free_cells:
-            self.particles = [
-                Particle(
-                    *(np.array(free_cells[randint(0, len(free_cells)-1)]) +
-                      np.random.uniform(-self.map_resolution, self.map_resolution, size=2).tolist()),
-                    uniform(-math.pi, math.pi), sigma=0.1
-                ) for _ in range(self.num_particles)
-            ]
-            self.get_logger().info(f"Inicializadas {len(self.particles)} partículas")
-
-    def laser_callback(self, msg):
-        """Callback LIDAR"""
-        self.current_scan = msg
-
-    def odom_callback(self, msg):
-        """Callback odometría"""
-        p = msg.pose.pose
-        yaw = self.quaternion_to_yaw(p.orientation)
-        
-        if self.previous_pose and self.particles:
-            # Calcular movimiento relativo
-            dx = p.position.x - self.previous_pose.position.x
-            dy = p.position.y - self.previous_pose.position.y
-            dtheta = self.normalize_angle(yaw - self.quaternion_to_yaw(self.previous_pose.orientation))
+        # Encontrar obstáculos
+        obstacles = np.argwhere(self.map_data > 50)
+        if len(obstacles) > 0:
+            # Convertir a coordenadas métricas
+            obstacles_metric = obstacles * self.map_info.resolution + \
+                             [self.map_info.origin.position.y, self.map_info.origin.position.x]
             
-            # Aplicar modelo de movimiento si hay movimiento significativo
-            if any(abs(v) > 1e-3 for v in [dx, dy, dtheta]):
-                for pt in self.particles:
-                    pt.move(dx, dy, dtheta)
-                    
-        self.previous_pose = p
-
-    def particle_filter_step(self):
-        """Paso principal del filtro de partículas (MCL)"""
-        if not (self.particles and self.current_scan and self.obstacle_coords):
+            # Crear KDTree
+            self.kdtree = KDTree(obstacles_metric)
+            
+            # Calcular likelihood field
+            self.calculate_likelihood_field()
+            
+            # Inicializar partículas
+            self.initialize_particles()
+            
+    def calculate_likelihood_field(self):
+        """Precalcular campo de verosimilitud"""
+        h, w = self.map_data.shape
+        self.likelihood_field = np.zeros((h, w))
+        
+        # Para cada celda libre
+        free_cells = np.argwhere(self.map_data == 0)
+        for y, x in free_cells:
+            # Coordenadas métricas
+            mx = self.map_info.origin.position.x + x * self.map_info.resolution
+            my = self.map_info.origin.position.y + y * self.map_info.resolution
+            
+            # Distancia al obstáculo más cercano
+            dist, _ = self.kdtree.query([my, mx])
+            
+            # Probabilidad gaussiana
+            self.likelihood_field[y, x] = norm.pdf(dist, 0, self.likelihood_sigma)
+            
+    def initialize_particles(self):
+        """Inicializar partículas en celdas libres"""
+        free_cells = np.argwhere(self.map_data == 0)
+        n_free = len(free_cells)
+        
+        if n_free > 0:
+            self.particles = []
+            for _ in range(self.num_particles):
+                y, x = free_cells[np.random.randint(n_free)]
+                
+                # Convertir a métricas con ruido
+                mx = self.map_info.origin.position.x + (x + np.random.uniform(-0.5, 0.5)) * self.map_info.resolution
+                my = self.map_info.origin.position.y + (y + np.random.uniform(-0.5, 0.5)) * self.map_info.resolution
+                theta = np.random.uniform(-np.pi, np.pi)
+                
+                self.particles.append(Particle(mx, my, theta))
+                
+    def laser_callback(self, msg):
+        self.current_scan = msg
+        
+    def odom_callback(self, msg):
+        """Calcular movimiento del robot"""
+        if self.previous_odom is not None and self.particles:
+            # Calcular desplazamiento
+            dx = msg.pose.pose.position.x - self.previous_odom.pose.pose.position.x
+            dy = msg.pose.pose.position.y - self.previous_odom.pose.pose.position.y
+            
+            # Cambio de orientación
+            _, _, yaw1 = euler_from_quaternion([
+                self.previous_odom.pose.pose.orientation.x,
+                self.previous_odom.pose.pose.orientation.y,
+                self.previous_odom.pose.pose.orientation.z,
+                self.previous_odom.pose.pose.orientation.w
+            ])
+            _, _, yaw2 = euler_from_quaternion([
+                msg.pose.pose.orientation.x,
+                msg.pose.pose.orientation.y,
+                msg.pose.pose.orientation.z,
+                msg.pose.pose.orientation.w
+            ])
+            dtheta = np.arctan2(np.sin(yaw2 - yaw1), np.cos(yaw2 - yaw1))
+            
+            # Mover partículas
+            for p in self.particles:
+                # Transformar al marco local
+                dx_local = dx * np.cos(p.theta) + dy * np.sin(p.theta)
+                dy_local = -dx * np.sin(p.theta) + dy * np.cos(p.theta)
+                
+                p.move(dx_local, dy_local, dtheta, self.motion_noise)
+                
+        self.previous_odom = msg
+        
+    def update_filter(self):
+        """Actualización principal del filtro"""
+        if not self.particles or self.current_scan is None or self.likelihood_field is None:
             return
-
-        # Paso de medición: actualizar pesos usando modelo de sensor
-        self.measurement_update()
+            
+        # Actualizar pesos
+        self.update_weights()
         
-        # Verificar convergencia
-        self.check_convergence()
-        
-        # Resampling (solo si no está localizado)
-        if not self.localized:
-            self.resample_particles()
+        # Resamplear
+        self.resample()
         
         # Publicar resultados
-        self.publish_particles()
-        self.publish_best_pose()
-        self.publish_confidence()
-
-    def measurement_update(self):
-        """Actualizar pesos de partículas usando modelo de sensor (Likelihood Fields)"""
-        tree = KDTree(self.obstacle_coords)
-        scan = self.current_scan
-        total_w = 0.0
-
+        self.publish_results()
+        
+    def update_weights(self):
+        """Actualizar pesos usando likelihood field"""
         for p in self.particles:
-            likelihood = 1.0
+            weight = 1.0
             
-            # Muestrear rayos para eficiencia (cada 20 rayos aproximadamente)
-            for i in range(0, len(scan.ranges), max(1, len(scan.ranges)//20)):
-                z = scan.ranges[i]
+            # Submuestrear rayos láser
+            n_beams = len(self.current_scan.ranges)
+            for i in range(0, n_beams, max(1, n_beams // 30)):
+                r = self.current_scan.ranges[i]
                 
-                # Ignorar lecturas inválidas
-                if z >= self.max_laser_range or z <= scan.range_min:
-                    continue
+                if self.current_scan.range_min < r < self.current_scan.range_max:
+                    # Ángulo del rayo
+                    angle = self.current_scan.angle_min + i * self.current_scan.angle_increment
                     
-                # Calcular punto final del rayo
-                a = scan.angle_min + i * scan.angle_increment + p.ang
-                x = p.x + z * math.cos(a)
-                y = p.y + z * math.sin(a)
-                
-                # Encontrar distancia al obstáculo más cercano
-                dist, _ = tree.query([x, y])
-                
-                # Calcular verosimilitud usando distribución gaussiana
-                likelihood *= max(self.gaussian(dist, 0.0, self.sensor_noise), 1e-6)
-                
-            p.weight = likelihood
-            total_w += likelihood
-
+                    # Punto final del rayo
+                    end_x = p.x + r * np.cos(p.theta + angle)
+                    end_y = p.y + r * np.sin(p.theta + angle)
+                    
+                    # Convertir a coordenadas del mapa
+                    map_x = int((end_x - self.map_info.origin.position.x) / self.map_info.resolution)
+                    map_y = int((end_y - self.map_info.origin.position.y) / self.map_info.resolution)
+                    
+                    # Verificar límites y obtener likelihood
+                    if 0 <= map_x < self.map_info.width and 0 <= map_y < self.map_info.height:
+                        weight *= (self.likelihood_field[map_y, map_x] + 0.1)
+                        
+            p.weight = weight
+            
+    def resample(self):
+        """Low variance resampling"""
+        if not self.particles:
+            return
+            
         # Normalizar pesos
-        if total_w > 0:
-            for p in self.particles:
-                p.weight /= total_w
-
-    def check_convergence(self):
-        """Verificar si el filtro ha convergido (criterio de localización)"""
-        if self.localized or not self.particles:
-            return
-            
-        # Calcular estadísticas de las partículas
-        positions = np.array([[p.x, p.y] for p in self.particles])
         weights = np.array([p.weight for p in self.particles])
+        weights = weights / weights.sum()
         
-        # Media ponderada de posiciones
-        mean_pos = np.average(positions, axis=0, weights=weights)
+        # Resamplear
+        new_particles = []
+        r = np.random.uniform(0, 1/self.num_particles)
+        c = weights[0]
+        i = 0
         
-        # Calcular dispersión espacial
-        distances = np.sqrt(np.sum((positions - mean_pos)**2, axis=1))
-        weighted_std = np.sqrt(np.average(distances**2, weights=weights))
-        
-        # Criterio de convergencia: dispersión < 0.5 metros
-        if weighted_std < 0.5:
-            self.localized = True
-            self.get_logger().info(f"¡Robot localizado! Posición: ({mean_pos[0]:.3f}, {mean_pos[1]:.3f})")
-            print(f"Pose localizada: x={mean_pos[0]:.3f}, y={mean_pos[1]:.3f}")
-
-    def resample_particles(self):
-        """Resampling sistemático de partículas"""
-        weights = [p.weight for p in self.particles]
-        
-        # Evitar división por cero
-        if sum(weights) == 0:
-            return
+        for m in range(self.num_particles):
+            u = r + m / self.num_particles
+            while u > c and i < len(self.particles) - 1:
+                i += 1
+                c += weights[i]
+                
+            p = self.particles[i]
+            new_particles.append(Particle(p.x, p.y, p.theta))
             
-        # Resampling con reemplazo usando numpy
-        idx = np.random.choice(len(self.particles), self.num_particles, p=weights)
+        self.particles = new_particles
         
-        # Crear nuevas partículas en las posiciones seleccionadas
-        self.particles = [
-            Particle(self.particles[i].x, self.particles[i].y, self.particles[i].ang, sigma=0.1)
-            for i in idx
-        ]
-
-    def publish_particles(self):
-        """Publicar partículas para visualización en RViz"""
-        msg = PoseArray()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = 'map'
+    def publish_results(self):
+        """Publicar partículas y mejor estimación"""
+        # Publicar partículas
+        pose_array = PoseArray()
+        pose_array.header.stamp = self.get_clock().now().to_msg()
+        pose_array.header.frame_id = 'world_map'
+        pose_array.poses = [p.to_pose() for p in self.particles]
+        self.particles_pub.publish(pose_array)
         
-        for p in self.particles:
-            pose = Pose()
-            pose.position.x, pose.position.y = p.x, p.y
-            pose.position.z = 0.0
+        # Calcular y publicar mejor pose
+        if self.particles:
+            # Media de las partículas
+            x_mean = np.mean([p.x for p in self.particles])
+            y_mean = np.mean([p.y for p in self.particles])
             
-            # Convertir ángulo a quaternion
-            pose.orientation.w = math.cos(p.ang / 2)
-            pose.orientation.z = math.sin(p.ang / 2)
-            msg.poses.append(pose)
+            # Media circular para ángulo
+            sin_sum = np.mean([np.sin(p.theta) for p in self.particles])
+            cos_sum = np.mean([np.cos(p.theta) for p in self.particles])
+            theta_mean = np.arctan2(sin_sum, cos_sum)
             
-        self.particles_pub.publish(msg)
-
-    def publish_best_pose(self):
-        """Publicar mejor estimación de pose (media ponderada)"""
-        if not self.particles:
-            return
+            # Publicar mejor pose
+            point = PointStamped()
+            point.header = pose_array.header
+            point.point.x = x_mean
+            point.point.y = y_mean
+            self.best_pose_pub.publish(point)
             
-        weights = np.array([p.weight for p in self.particles])
-        positions = np.array([[p.x, p.y] for p in self.particles])
-        mean = np.average(positions, axis=0, weights=weights)
-        
-        msg = PointStamped()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = 'map'
-        msg.point.x, msg.point.y = mean
-        msg.point.z = 0.0
-        
-        self.best_pose_pub.publish(msg)
-
-    def publish_confidence(self):
-        """Publicar confianza de localización"""
-        if not self.particles:
-            return
+            # Calcular y publicar confianza
+            std_x = np.std([p.x for p in self.particles])
+            std_y = np.std([p.y for p in self.particles])
+            confidence = np.exp(-5 * np.sqrt(std_x**2 + std_y**2))
             
-        weights = np.array([p.weight for p in self.particles])
-        max_w = np.max(weights)
-        eff = 1.0 / np.sum(weights**2) if np.sum(weights**2) > 0 else 0
-        
-        msg = Float64()
-        msg.data = max_w * eff / self.num_particles
-        self.confidence_pub.publish(msg)
-
-    def quaternion_to_yaw(self, q):
-        """Convertir quaternion a ángulo yaw"""
-        return math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y**2 + q.z**2))
-
-    def normalize_angle(self, a):
-        """Normalizar ángulo al rango [-π, π]"""
-        return (a + math.pi) % (2 * math.pi) - math.pi
-
-    def gaussian(self, x, mu, sigma):
-        """Calcular probabilidad gaussiana"""
-        return math.exp(-0.5 * ((x - mu) / sigma) ** 2) / (sigma * math.sqrt(2 * math.pi))
+            conf_msg = Float64()
+            conf_msg.data = confidence
+            self.confidence_pub.publish(conf_msg)
+            
+            # Verificar localización
+            if confidence > self.convergence_threshold and not self.localized:
+                self.localized = True
+                self.get_logger().info(f"¡Localizado! Pose: ({x_mean:.2f}, {y_mean:.2f}, {theta_mean:.2f})")
+                
 
 def main(args=None):
     rclpy.init(args=args)
     node = ParticleFilter()
+    
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
@@ -289,6 +290,7 @@ def main(args=None):
     finally:
         node.destroy_node()
         rclpy.shutdown()
+        
 
 if __name__ == '__main__':
     main()
