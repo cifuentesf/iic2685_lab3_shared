@@ -4,16 +4,11 @@ import rclpy
 from rclpy.node import Node
 import numpy as np
 from typing import List
-
-# Mensajes ROS2
 from geometry_msgs.msg import PoseArray, PointStamped
 from std_msgs.msg import Float64, ColorRGBA
 from visualization_msgs.msg import Marker, MarkerArray
 
 class VisualizationManager(Node):
-    """
-    Nodo para mejorar la visualización del filtro de partículas en RViz
-    """
     
     def __init__(self):
         super().__init__('visualization_manager')
@@ -30,12 +25,8 @@ class VisualizationManager(Node):
         
         # Publicadores
         self.particles_marker_publisher = self.create_publisher( MarkerArray, '/particles_markers',10)
-        
-        self.best_pose_marker_publisher = self.create_publisher(
-            Marker, '/best_pose_marker', 10)
-        
-        self.confidence_marker_publisher = self.create_publisher(
-            Marker, '/confidence_text', 10)
+        self.best_pose_marker_publisher = self.create_publisher( Marker, '/best_pose_marker', 10)
+        self.confidence_marker_publisher = self.create_publisher( Marker, '/confidence_text', 10)
         
         # Variables
         self.current_confidence = 0.0

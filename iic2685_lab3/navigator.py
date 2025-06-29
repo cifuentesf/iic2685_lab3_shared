@@ -7,6 +7,10 @@ import math
 from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Twist
 from std_msgs.msg import Float64
+import time
+import cv2
+from cv_bridge import CvBridge
+
 
 class Navigation(Node):
     
@@ -16,6 +20,7 @@ class Navigation(Node):
         # Parámetros
         self.linear_speed = 0.3          # [m/s]
         self.max_angular_speed = 1.0     # [rad/s]
+        self.rotate_time = np.pi/2         # [s] ~ tiempo aproximado de giro 90° grados
         self.desired_wall_distance = 0.3 # [m]
         self.min_front_distance = 0.3   # [m]
         
@@ -67,14 +72,14 @@ class Navigation(Node):
         valid_ranges[valid_ranges <= scan.range_min] = scan.range_max
         
         # Dividir el escaneo en regiones
-        n_rays = len(valid_ranges)
-        third = n_rays // 3
+        n_rayos = len(valid_ranges)
+        parte = n_rayos // 3
         
-        left_ranges = valid_ranges[:third]
-        front_ranges = valid_ranges[third:2*third]
-        right_ranges = valid_ranges[2*third:]
+        left_ranges = valid_ranges[:parte]
+        front_ranges = valid_ranges[parte:2*parte]
+        right_ranges = valid_ranges[2*parte:]
         
-        # Distancias mínimas en cada región
+        # Distancias media en cada region
         front_dist = np.min(front_ranges)
         left_dist = np.min(left_ranges)
         right_dist = np.min(right_ranges)
@@ -92,6 +97,8 @@ class Navigation(Node):
             else:
                 cmd.angular.z = self.max_angular_speed   # Girar a la izquierda
             cmd.linear.x = 0.0
+            self.cmd_vel_publisher.publish(cmd)
+            time.sleep(self.rotate_time)
             
         else:
             # Camino libre
@@ -106,8 +113,10 @@ class Navigation(Node):
             cmd.angular.z = -0.5 * error  # e*Kp
 
             cmd.angular.z = max(-self.max_angular_speed, min(self.max_angular_speed, cmd.angular.z))
+            self.cmd_vel_publisher.publish(cmd)
         
-        self.cmd_vel_publisher.publish(cmd)
+        self.get_logger().info(f"Error: (speed {cmd:.3f})")
+
         
     def stop_robot(self):
         cmd = Twist()
