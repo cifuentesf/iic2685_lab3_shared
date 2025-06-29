@@ -19,7 +19,7 @@ class ReactiveNavigator(Node):
         self.angular_speed = 0.6  # Reducido para giros más suaves
         self.wall_distance = 0.35  # Distancia deseada a la pared
         self.min_front_distance = 0.4  # Distancia mínima frontal
-        self.confidence_threshold = 0.8
+        self.intervalo_confianza = 0.8
         
         # Estado
         self.exploring = True
@@ -41,14 +41,13 @@ class ReactiveNavigator(Node):
         self.current_scan = msg
         
     def confidence_callback(self, msg):
-        """Detener cuando localizado"""
-        if msg.data > self.confidence_threshold and self.exploring:
+        exploring = False #self.exploring
+        if msg.data > self.intervalo_confianza and exploring: #Encuentra localizacion
             self.exploring = False
             self.stop_robot()
             self.get_logger().info(f"Localización completada (confianza: {msg.data:.2f})")
             
     def navigate(self):
-        """Control de navegación principal"""
         if not self.exploring or self.current_scan is None:
             return
             
@@ -75,7 +74,7 @@ class ReactiveNavigator(Node):
         self.get_logger().debug(f"Regiones: front={regions['front']:.2f}, right={regions['right']:.2f}, left={regions['left']:.2f}")
         
         if regions['front'] < self.min_front_distance:
-            # Obstáculo adelante - girar
+            # Obstáculo
             cmd.linear.x = 0.0
             cmd.angular.z = self.angular_speed if regions['left'] > regions['right'] else -self.angular_speed
             self.get_logger().debug("Obstáculo frontal - girando")
