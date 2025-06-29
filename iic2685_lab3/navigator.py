@@ -3,6 +3,7 @@
 import rclpy
 from rclpy.node import Node
 import numpy as np
+
 from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Twist
 from std_msgs.msg import Float64
@@ -13,12 +14,14 @@ class ReactiveNavigator(Node):
     def __init__(self):
         super().__init__('reactive_navigator')
         
-        # Parámetros
-        self.linear_speed = 0.2
-        self.angular_speed = 0.8
-        self.wall_distance = 0.4
-        self.min_front_distance = 0.5
+        # Parámetros internos
+        self.linear_speed = 0.15  # Reducido para mejor control
+        self.angular_speed = 0.6  # Reducido para giros más suaves
+        self.wall_distance = 0.35  # Distancia deseada a la pared
+        self.min_front_distance = 0.4  # Distancia mínima frontal
         self.confidence_threshold = 0.8
+        
+        # Estado
         self.exploring = True
         self.current_scan = None
         
@@ -38,7 +41,7 @@ class ReactiveNavigator(Node):
         self.current_scan = msg
         
     def confidence_callback(self, msg):
-        """Se encarga de detener el bot y printear localización"""
+        """Detener cuando localizado"""
         if msg.data > self.confidence_threshold and self.exploring:
             self.exploring = False
             self.stop_robot()
@@ -49,10 +52,13 @@ class ReactiveNavigator(Node):
         if not self.exploring or self.current_scan is None:
             return
             
+        # Procesar escaneo láser
         ranges = np.array(self.current_scan.ranges)
-        ranges[ranges > self.current_scan.range_max] = self.current_scan.range_max
-        ranges[ranges < self.current_scan.range_min] = self.current_scan.range_max
+        # Reemplazar valores inválidos con un valor seguro (no el máximo)
+        mask = (ranges < self.current_scan.range_min) | (ranges > self.current_scan.range_max) | np.isnan(ranges) | np.isinf(ranges)
+        ranges[mask] = self.wall_distance * 2  # Valor seguro pero no infinito
         
+        # Dividir en regiones
         n = len(ranges)
         regions = {
             'right': np.min(ranges[:n//6]),
@@ -62,24 +68,41 @@ class ReactiveNavigator(Node):
             'left': np.min(ranges[5*n//6:])
         }
         
-
+        # Lógica de navegación
         cmd = Twist()
+        
+        # Debug info
+        self.get_logger().debug(f"Regiones: front={regions['front']:.2f}, right={regions['right']:.2f}, left={regions['left']:.2f}")
         
         if regions['front'] < self.min_front_distance:
             # Obstáculo adelante - girar
             cmd.linear.x = 0.0
             cmd.angular.z = self.angular_speed if regions['left'] > regions['right'] else -self.angular_speed
+            self.get_logger().debug("Obstáculo frontal - girando")
         else:
             # Seguir pared derecha
-            if regions['right'] > 2 * self.wall_distance:
-                # No hay pared - girar hacia ella
-                cmd.linear.x = self.linear_speed * 0.5
-                cmd.angular.z = -self.angular_speed * 0.5
+            if regions['right'] > self.wall_distance * 1.5:
+                # No hay pared cercana - buscarla
+                if regions['front_right'] < regions['right']:
+                    # Hay pared adelante a la derecha
+                    cmd.linear.x = self.linear_speed
+                    cmd.angular.z = 0.0
+                else:
+                    # Girar ligeramente hacia la derecha para buscar pared
+                    cmd.linear.x = self.linear_speed * 0.7
+                    cmd.angular.z = -self.angular_speed * 0.3
             else:
-                # Mantener distancia a la pared
+                # Hay pared - mantener distancia
                 error = regions['right'] - self.wall_distance
                 cmd.linear.x = self.linear_speed
-                cmd.angular.z = np.clip(-error * 2.0, -self.angular_speed, self.angular_speed)
+                
+                # Control proporcional con límites
+                kp = 3.0
+                cmd.angular.z = np.clip(-error * kp, -self.angular_speed, self.angular_speed)
+                
+                # Si muy cerca de la pared, reducir velocidad lineal
+                if regions['right'] < self.wall_distance * 0.7:
+                    cmd.linear.x *= 0.5
                 
         self.cmd_vel_pub.publish(cmd)
         

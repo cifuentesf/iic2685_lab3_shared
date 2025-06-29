@@ -15,6 +15,8 @@ Panels:
         - /PointStamped1
         - /PointStamped1/Topic1
         - /PoseArray1
+        - /Marker1
+        - /Marker1/Topic1
       Splitter Ratio: 0.5
     Tree Height: 555
   - Class: rviz_common/Selection
@@ -161,6 +163,20 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /particles
       Value: true
+    - Class: rviz_default_plugins/Marker
+      Enabled: true
+      Name: Marker
+      Namespaces:
+        best_pose: true
+        best_pose_cylinder: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /best_pose_marker
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -243,5 +259,5 @@ Window Geometry:
   Views:
     collapsed: false
   Width: 1200
-  X: 28
-  Y: 28
+  X: -4
+  Y: -4
