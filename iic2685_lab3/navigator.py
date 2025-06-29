@@ -27,7 +27,6 @@ class Navigation(Node):
         # Suscriptores
         self.laser_subscriber = self.create_subscription(
             LaserScan, '/scan', self.laser_callback, 10)
-        
         self.confidence_subscriber = self.create_subscription(
             Float64, '/localization_confidence', self.confidence_callback, 10)
         
