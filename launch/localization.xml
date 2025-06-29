@@ -1,34 +1,32 @@
 <launch>
-    
-    <!-- Robot Simulation -->
-    <include file="$(find-pkg-share very_simple_robot_simulator)/launch/run_all.xml" /> 
 
-    <!-- Transforms between reference frames -->
-    <node pkg="tf2_ros" exec="static_transform_publisher" name="world_map_to_odom" args="--x 0.5 --y 0.5 --z 0.0 --roll 0.0 --pitch 0.0 --yaw 0.0 --frame-id world_map --child-frame-id odom"/>
+  <!-- Simulador básico -->
+  <include file="$(find-pkg-share very_simple_robot_simulator)/launch/minimal_simulator_py.xml" />
+  
+  <!-- Simulador LIDAR -->
+  <include file="$(find-pkg-share very_simple_robot_simulator)/launch/lidar_simulator.xml" />
+  
+  <!-- Servidor de mapas -->
+  <node pkg="very_simple_robot_simulator" name="world_state_gui" exec="world_state_gui.py" output="screen">
+    <param name="map_file" value="$(find-pkg-share iic2685_lab3)/maps/mapa.yaml" />
+  </node>
 
-    <!-- RViz2 -->
-    <node pkg="rviz2" exec="rviz2" name="rviz2" output="screen"/>
-    
-    <!--
-    ARCHIVOS PARA LAB 3
-    -->
-    
-    <!-- Nodo del modelo de sensor (Actividad 1) -->
-    <node pkg="iic2685_lab3" exec="sensor_model" name="sensor_model" output="screen"/>
-    
-    <!-- Nodo del filtro de partículas (Actividad 2) -->
-    <node pkg="iic2685_lab3" exec="particle_filter" name="particle_filter" output="screen" />
-    
-    <!-- Nodo de seguimiento de pared para exploración -->
-    <node pkg="iic2685_lab3" exec="wall_follower" name="wall_follower" output="screen" />
-    
-    <!-- Nodo publicador del mapa -->
-    <node pkg="iic2685_lab3" exec="map_publisher" name="map_publisher" output="screen"/>
+  <!-- Transforms between reference frames -->
+  <node pkg="tf2_ros" exec="static_transform_publisher" name="world_map_to_odom" 
+        args="--x 0.5 --y 0.5 --z 0.0 --roll 0.0 --pitch 0.0 --yaw 0.0 --frame-id world_map --child-frame-id odom"/>
 
-    
-    <!-- RViz para visualización -->
-    <!-- 
-    <node pkg="rviz2" exec="rviz2" name="rviz2" output="screen" args="-d /home/slawhs/robotica_movil_ws/src/ayudantia_rviz/rviz/rviz_config_ayudantia.rviz"/> 
-    -->
+  <!-- RViz2 -->
+  <node pkg="rviz2" exec="rviz2" name="rviz2" output="screen"/>
+
+  <!-- LAB 3 - Actividad 2 -->
+  
+  <!-- Filtro de Partículas -->
+  <node pkg="iic2685_lab3" exec="particle_filter.py" name="particle_filter" output="screen" />
+  
+  <!-- Navegación Reactiva -->
+  <node pkg="iic2685_lab3" exec="navigator.py" name="navigator" output="screen" />
+  
+  <!-- Visualizador -->
+  <node pkg="iic2685_lab3" exec="visualization_manager.py" name="visualization_manager" output="screen"/>
 
 </launch>

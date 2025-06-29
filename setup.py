@@ -26,10 +26,9 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'sensor_model = iic2685_lab3.sensor_model:main',
-            'particle_filter = iic2685_lab3.particle_filter:main',
-            'wall_follower = iic2685_lab3.wall_follower:main',
-            'map_publisher = iic2685_lab3.map_publisher:main',
+            'particle_filter.py = iic2685_lab3.particle_filter:main',
+            'navigator.py = iic2685_lab3.navigator:main',
+            'visualization_manager.py = iic2685_lab3.visualization_manager:main',
         ],
     },
 )
