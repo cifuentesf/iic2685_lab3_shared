@@ -6,7 +6,7 @@ import numpy as np
 import cv2
 from scipy.spatial import KDTree
 from scipy.stats import norm
-
+from  random import gauss
 from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import PoseArray, Pose, PointStamped, Quaternion
 from nav_msgs.msg import OccupancyGrid, Odometry
@@ -15,14 +15,15 @@ from tf_transformations import quaternion_from_euler, euler_from_quaternion
 
 
 class Particle:
+
     def __init__(self, x, y, theta, weight=1.0):
         self.x = x
         self.y = y
         self.theta = theta
         self.weight = weight
+        self.sigma = 0.1
         
     def move(self, dx, dy, dtheta, motion_noise):
-        """Aplicar modelo de movimiento con ruido Gaussiano"""
         self.x += dx + np.random.normal(0, motion_noise[0])
         self.y += dy + np.random.normal(0, motion_noise[1])
         self.theta += dtheta + np.random.normal(0, motion_noise[2])
@@ -30,7 +31,6 @@ class Particle:
         self.theta = np.arctan2(np.sin(self.theta), np.cos(self.theta))
         
     def to_pose(self):
-        """Convertir partícula a mensaje Pose"""
         pose = Pose()
         pose.position.x = self.x
         pose.position.y = self.y
@@ -270,7 +270,7 @@ class ParticleFilter(Node):
             std_x = np.std([p.x for p in self.particles])
             std_y = np.std([p.y for p in self.particles])
             # Hacer la confianza más conservadora
-            confidence = np.exp(-8 * np.sqrt(std_x**2 + std_y**2))  # Factor aumentado de 5 a 8
+            confidence = np.exp(-8 * np.sqrt(std_x**2 + std_y**2))  
             
             # Considerar el tiempo transcurrido
             elapsed_time = (self.get_clock().now() - self.start_time).nanoseconds / 1e9

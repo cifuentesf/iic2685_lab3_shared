@@ -25,6 +25,11 @@
   <node pkg="rviz2" exec="rviz2" name="rviz2" output="screen"
         args="-d $(find-pkg-share iic2685_lab3)/rviz/configuration.rviz"/>
 
+    <!-- Recieves input from keyboard -->
+  <!-- 
+  <node pkg="teleop_twist_keyboard" exec="teleop_twist_keyboard" name="teleop_twist_keyboard" output="screen"/>
+  -->
+
   <!-- LAB 3 - Actividad 2 -->
   
   <!-- Filtro de Partículas -->
