@@ -38,7 +38,4 @@
   <!-- Navegación -->
   <node pkg="iic2685_lab3" exec="navigator.py" name="navigation" output="screen" />
   
-  <!-- Visualizador -->
-  <node pkg="iic2685_lab3" exec="visualization_manager.py" name="visualization_manager" output="screen"/>
-
 </launch>

@@ -47,7 +47,7 @@ class Simple_Navigator(Node):
 
         # Mensaje de velocidad
         self.vel_msg = Twist()
-
+    
         # Subs y Pubs
         self.odom_sub = self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
         self.laser_sub = self.create_subscription(LaserScan, '/scan', self.laser_callback, 10)

@@ -4,17 +4,17 @@ import rclpy
 from rclpy.node import Node
 import numpy as np
 import cv2
-from random import uniform, gauss
+from random import uniform, gauss, choices
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PoseArray, Pose, PointStamped
-from std_msgs.msg import Float64
+from std_msgs.msg import Float64, Header
 from tf_transformations import quaternion_from_euler, euler_from_quaternion
-from scipy.spatial import cKDTree
+from scipy.spatial.distance import cdist
 
 
 class Particle:
-    """Clase partícula integrada (basada en ayudantia_rviz)"""
+    """Clase partícula basada en ayudantia_rviz"""
     def __init__(self, x, y, ang, sigma=0.02):
         self.x, self.y, self.ang = x, y, ang
         self.weight = 1.0
@@ -44,32 +44,28 @@ class ParticleFilter(Node):
     def __init__(self):
         super().__init__('particle_filter')
         
-        # Parámetros del filtro MCL
-        self.num_particles = 200
-        self.sigma_motion = 0.03        # Ruido de movimiento
-        self.sigma_hit = 0.15           # Desviación estándar para likelihood fields
-        self.z_hit = 0.95               # Peso para mediciones correctas
-        self.z_random = 0.05            # Peso para mediciones aleatorias
-        self.z_max = 3.5                # Distancia máxima del sensor
+        # Parámetros del filtro MCL (internos)
+        self.num_particles = 150
+        self.sigma_motion = 0.03
+        self.sigma_hit = 0.15
+        self.z_hit = 0.95
+        self.z_random = 0.05
+        self.z_max = 3.5
         
-        # Partículas y estado
+        # Estado del filtro
         self.particles = []
         self.map_data = None
         self.map_info = None
         self.current_scan = None
         self.last_odom = None
-        self.localized = False
+        self.prev_odom = None
         
-        # Campo de verosimilitud (likelihood field) precalculado
+        # Campo de verosimilitud precalculado
         self.likelihood_field = None
-        self.obstacle_coordinates = []
-        self.obstacle_kdtree = None
         
-        # Cargar mapa y precalcular likelihood field
+        # Cargar mapa y inicializar
         self.load_map()
         self.precompute_likelihood_field()
-        
-        # Inicializar partículas
         self.initialize_particles()
         
         # Suscriptores
@@ -81,7 +77,7 @@ class ParticleFilter(Node):
         self.best_pose_pub = self.create_publisher(PointStamped, '/best_pose', 10)
         self.confidence_pub = self.create_publisher(Float64, '/localization_confidence', 10)
         
-        # Timer para el filtro MCL
+        # Timer para MCL
         self.create_timer(0.2, self.mcl_update)
         
         self.get_logger().info(f"Filtro MCL iniciado con {self.num_particles} partículas")
@@ -99,82 +95,66 @@ class ParticleFilter(Node):
             
             # Información del mapa
             self.map_info = {
-                'resolution': 0.01,  # m/pixel
+                'resolution': 0.01,
                 'origin': [0.0, 0.0, 0.0],
                 'width': self.map_data.shape[1],
                 'height': self.map_data.shape[0]
             }
             
-            self.get_logger().info(f"Mapa cargado: {self.map_info['width']}x{self.map_info['height']} píxeles")
+            self.get_logger().info(f"Mapa cargado: {self.map_info['width']}x{self.map_info['height']}")
             
         except Exception as e:
             self.get_logger().error(f"Error cargando mapa: {e}")
-            # Crear mapa dummy
+            # Mapa dummy
             self.map_data = np.ones((270, 270), dtype=np.uint8) * 255
             self.map_info = {'resolution': 0.01, 'origin': [0.0, 0.0, 0.0], 'width': 270, 'height': 270}
 
     def precompute_likelihood_field(self):
-        """Precalcular campo de verosimilitud según Likelihood Fields Model"""
+        """Precalcular campo de verosimilitud - Likelihood Fields Model"""
         self.get_logger().info("Precalculando campo de verosimilitud...")
         
-        # Encontrar coordenadas de obstáculos
-        obstacle_pixels = np.where(self.map_data < 100)  # Píxeles ocupados
+        # Encontrar obstáculos
+        obstacle_pixels = np.where(self.map_data < 100)
         
         if len(obstacle_pixels[0]) == 0:
-            # No hay obstáculos, crear campo uniforme
             self.likelihood_field = np.ones_like(self.map_data, dtype=np.float32) * 0.1
-            self.get_logger().warn("No se encontraron obstáculos en el mapa")
             return
         
-        # Convertir píxeles a coordenadas métricas
-        self.obstacle_coordinates = []
-        for py, px in zip(obstacle_pixels[0], obstacle_pixels[1]):
-            x = px * self.map_info['resolution'] + self.map_info['origin'][0]
-            y = py * self.map_info['resolution'] + self.map_info['origin'][1]
-            self.obstacle_coordinates.append([x, y])
+        # Crear campo de distancias
+        h, w = self.map_data.shape
+        y_coords, x_coords = np.mgrid[0:h, 0:w]
+        all_coords = np.column_stack([y_coords.ravel(), x_coords.ravel()])
+        obstacle_coords = np.column_stack([obstacle_pixels[0], obstacle_pixels[1]])
         
-        # Crear KD-Tree para búsqueda rápida de obstáculos más cercanos
-        self.obstacle_kdtree = cKDTree(self.obstacle_coordinates)
+        # Calcular distancias mínimas eficientemente
+        distances = cdist(all_coords, obstacle_coords, metric='euclidean')
+        min_distances = np.min(distances, axis=1)
         
-        # Precalcular campo de verosimilitud para cada píxel del mapa
-        self.likelihood_field = np.zeros_like(self.map_data, dtype=np.float32)
+        # Aplicar distribución gaussiana
+        likelihood_values = np.exp(-0.5 * (min_distances / (self.sigma_hit / self.map_info['resolution'])) ** 2)
+        self.likelihood_field = likelihood_values.reshape(h, w).astype(np.float32)
         
-        for py in range(self.map_data.shape[0]):
-            for px in range(self.map_data.shape[1]):
-                # Convertir píxel a coordenadas métricas
-                x = px * self.map_info['resolution'] + self.map_info['origin'][0]
-                y = py * self.map_info['resolution'] + self.map_info['origin'][1]
-                
-                # Encontrar distancia al obstáculo más cercano
-                distance, _ = self.obstacle_kdtree.query([x, y])
-                
-                # Calcular verosimilitud usando distribución gaussiana
-                likelihood = np.exp(-0.5 * (distance / self.sigma_hit) ** 2)
-                self.likelihood_field[py, px] = likelihood
-        
-        self.get_logger().info(f"Campo de verosimilitud calculado para {len(self.obstacle_coordinates)} obstáculos")
+        self.get_logger().info("Campo de verosimilitud calculado")
 
     def initialize_particles(self):
-        """Inicializar partículas uniformemente en espacio libre"""
+        """Inicializar partículas en espacio libre"""
         self.particles = []
-        
-        map_width_m = self.map_info['width'] * self.map_info['resolution']
-        map_height_m = self.map_info['height'] * self.map_info['resolution']
-        
         attempts = 0
-        while len(self.particles) < self.num_particles and attempts < self.num_particles * 10:
-            x = uniform(0.1, map_width_m - 0.1)
-            y = uniform(0.1, map_height_m - 0.1)
+        max_attempts = self.num_particles * 10
+        
+        while len(self.particles) < self.num_particles and attempts < max_attempts:
+            x = uniform(0.5, 2.0)
+            y = uniform(0.5, 2.0)
             ang = uniform(-np.pi, np.pi)
             
             if self.is_free_space(x, y):
                 particle = Particle(x, y, ang, self.sigma_motion)
                 particle.weight = 1.0 / self.num_particles
                 self.particles.append(particle)
-            
+                
             attempts += 1
         
-        # Si no se pudieron crear suficientes, llenar con posiciones aleatorias
+        # Completar con posiciones aleatorias si es necesario
         while len(self.particles) < self.num_particles:
             x = uniform(0.5, 2.0)
             y = uniform(0.5, 2.0)
@@ -184,7 +164,7 @@ class ParticleFilter(Node):
             self.particles.append(particle)
 
     def is_free_space(self, x, y):
-        """Verificar si una posición está en espacio libre"""
+        """Verificar si posición está en espacio libre"""
         px = int((x - self.map_info['origin'][0]) / self.map_info['resolution'])
         py = int((y - self.map_info['origin'][1]) / self.map_info['resolution'])
         
@@ -198,140 +178,119 @@ class ParticleFilter(Node):
         self.current_scan = msg
 
     def odom_callback(self, msg):
-        """Callback para odometría - NO aplicar modelo de movimiento aquí"""
+        """Callback para odometría"""
         self.last_odom = msg
 
     def mcl_update(self):
-        """Algoritmo MCL principal - Tabla 8.2 del libro"""
+        """Algoritmo MCL principal - Tabla 8.2"""
         if self.current_scan is None or len(self.particles) == 0:
             return
         
-        # Paso 1: Motion Update (Predicción) - solo si hay odometría
+        # 1. Motion Update (Predicción)
         if self.last_odom is not None:
             self.sample_motion_model()
         
-        # Paso 2: Measurement Update (Corrección)
+        # 2. Measurement Update (Corrección)
         self.measurement_model_update()
         
-        # Paso 3: Resampling
+        # 3. Resampling
         if self.effective_sample_size() < self.num_particles * 0.5:
             self.resample()
         
-        # Paso 4: Calcular confianza y publicar resultados
+        # 4. Publicar resultados
         confidence = self.calculate_confidence()
         self.publish_particles()
         self.publish_best_pose()
         self.publish_confidence(confidence)
-        
-        # Log de debugging
-        if confidence > 0.1:
-            max_weight = max(p.weight for p in self.particles)
-            avg_weight = sum(p.weight for p in self.particles) / len(self.particles)
-            self.get_logger().info(
-                f"Confianza: {confidence:.3f} | "
-                f"Peso máx: {max_weight:.6f} | "
-                f"ESS: {self.effective_sample_size():.1f}",
-                throttle_duration_sec=2.0
-            )
 
     def sample_motion_model(self):
-        """Aplicar modelo de movimiento a todas las partículas (Línea 4 MCL)"""
-        # Movimiento simple: pequeño ruido aleatorio para simular movimiento
+        """Modelo de movimiento simple"""
+        if self.prev_odom is None:
+            self.prev_odom = self.last_odom
+            return
+        
+        # Calcular movimiento desde odometría
+        dx = self.last_odom.pose.pose.position.x - self.prev_odom.pose.pose.position.x
+        dy = self.last_odom.pose.pose.position.y - self.prev_odom.pose.pose.position.y
+        
+        curr_yaw = euler_from_quaternion([
+            self.last_odom.pose.pose.orientation.x,
+            self.last_odom.pose.pose.orientation.y,
+            self.last_odom.pose.pose.orientation.z,
+            self.last_odom.pose.pose.orientation.w
+        ])[2]
+        
+        prev_yaw = euler_from_quaternion([
+            self.prev_odom.pose.pose.orientation.x,
+            self.prev_odom.pose.pose.orientation.y,
+            self.prev_odom.pose.pose.orientation.z,
+            self.prev_odom.pose.pose.orientation.w
+        ])[2]
+        
+        dyaw = Particle.normalize_angle(curr_yaw - prev_yaw)
+        
+        # Aplicar movimiento a todas las partículas
         for particle in self.particles:
-            # Agregar pequeño ruido de movimiento para diversidad
-            dx = gauss(0, self.sigma_motion * 0.1)
-            dy = gauss(0, self.sigma_motion * 0.1)
-            dang = gauss(0, self.sigma_motion * 0.05)
-            
-            particle.x += dx
-            particle.y += dy
-            particle.ang += dang
-            particle.ang = Particle.normalize_angle(particle.ang)
+            particle.move(dx, dy, dyaw)
+        
+        self.prev_odom = self.last_odom
 
     def measurement_model_update(self):
-        """Actualizar pesos usando modelo de medición (Línea 5 MCL)"""
+        """Actualización con modelo de sensor - Likelihood Fields"""
+        ranges = np.array(self.current_scan.ranges)
+        ranges[~np.isfinite(ranges)] = self.z_max
+        ranges[ranges <= 0.0] = self.z_max
+        ranges = np.clip(ranges, 0.1, self.z_max)
+        
+        # Submuestrear lecturas para eficiencia
+        angle_min = self.current_scan.angle_min
+        angle_inc = self.current_scan.angle_increment
+        step = max(1, len(ranges) // 20)  # Usar ~20 rayos
+        
         for particle in self.particles:
-            particle.weight = self.likelihood_field_measurement_model(particle, self.current_scan)
-        
-        # Normalizar pesos
-        total_weight = sum(p.weight for p in self.particles)
-        if total_weight > 0:
-            for particle in self.particles:
-                particle.weight /= total_weight
-        else:
-            # Si todos los pesos son 0, reinicializar uniformemente
-            for particle in self.particles:
-                particle.weight = 1.0 / self.num_particles
-
-    def likelihood_field_measurement_model(self, particle, scan):
-        """Modelo de medición usando Likelihood Fields (Algoritmo del libro)"""
-        if scan is None or self.likelihood_field is None:
-            return 0.01
-        
-        # Producto de verosimilitudes para múltiples rayos
-        q = 1.0
-        
-        # Usar subconjunto de rayos para eficiencia
-        num_beams = len(scan.ranges)
-        step = max(1, num_beams // 20)  # ~20 rayos
-        
-        for i in range(0, num_beams, step):
-            z = scan.ranges[i]
+            likelihood = 1.0
             
-            # Ignorar mediciones inválidas
-            if not np.isfinite(z) or z <= scan.range_min or z >= scan.range_max:
-                continue
+            for i in range(0, len(ranges), step):
+                z = ranges[i]
+                if z >= self.z_max:
+                    continue
+                
+                # Calcular punto de impacto esperado
+                angle = angle_min + i * angle_inc + particle.ang
+                x_hit = particle.x + z * np.cos(angle)
+                y_hit = particle.y + z * np.sin(angle)
+                
+                # Convertir a coordenadas del mapa
+                px = int((x_hit - self.map_info['origin'][0]) / self.map_info['resolution'])
+                py = int((y_hit - self.map_info['origin'][1]) / self.map_info['resolution'])
+                
+                # Obtener likelihood del campo precalculado
+                if 0 <= px < self.map_info['width'] and 0 <= py < self.map_info['height']:
+                    p_hit = self.z_hit * self.likelihood_field[py, px]
+                else:
+                    p_hit = 0.0
+                
+                p_random = self.z_random / self.z_max
+                likelihood *= (p_hit + p_random)
             
-            # Calcular posición del punto final del rayo
-            angle = scan.angle_min + i * scan.angle_increment + particle.ang
-            x_hit = particle.x + z * np.cos(angle)
-            y_hit = particle.y + z * np.sin(angle)
-            
-            # Obtener verosimilitud del campo precalculado
-            likelihood = self.get_likelihood_from_field(x_hit, y_hit)
-            
-            # Modelo de medición mixto: hit + random
-            p_hit = self.z_hit * likelihood
-            p_random = self.z_random / self.z_max
-            
-            q *= (p_hit + p_random)
-        
-        return max(q, 1e-10)  # Evitar peso cero
-
-    def get_likelihood_from_field(self, x, y):
-        """Obtener verosimilitud del campo precalculado"""
-        # Convertir coordenadas métricas a píxeles
-        px = int((x - self.map_info['origin'][0]) / self.map_info['resolution'])
-        py = int((y - self.map_info['origin'][1]) / self.map_info['resolution'])
-        
-        # Verificar límites
-        if px < 0 or px >= self.map_info['width'] or py < 0 or py >= self.map_info['height']:
-            return 0.01
-        
-        return self.likelihood_field[py, px]
+            particle.weight = likelihood
 
     def resample(self):
-        """Remuestreo con reemplazo según pesos (Líneas 8-11 MCL)"""
+        """Remuestreo por importancia"""
+        weights = np.array([p.weight for p in self.particles])
+        
+        if np.sum(weights) == 0:
+            weights = np.ones(len(weights))
+        
+        weights /= np.sum(weights)
+        
+        # Remuestreo con reemplazo
+        indices = choices(range(len(self.particles)), weights=weights, k=self.num_particles)
         new_particles = []
         
-        # Crear distribución acumulativa
-        weights = [p.weight for p in self.particles]
-        cumsum = np.cumsum(weights)
-        
-        # Remuestreo de rueda de la fortuna
-        for _ in range(self.num_particles):
-            r = uniform(0, cumsum[-1])
-            idx = np.searchsorted(cumsum, r)
-            idx = min(idx, len(self.particles) - 1)
-            
-            # Crear copia de partícula seleccionada con pequeño ruido
-            old_particle = self.particles[idx]
-            new_particle = Particle(
-                old_particle.x + gauss(0, self.sigma_motion * 0.1),
-                old_particle.y + gauss(0, self.sigma_motion * 0.1),
-                old_particle.ang + gauss(0, self.sigma_motion * 0.05),
-                self.sigma_motion
-            )
+        for i in indices:
+            old_particle = self.particles[i]
+            new_particle = Particle(old_particle.x, old_particle.y, old_particle.ang, self.sigma_motion)
             new_particle.weight = 1.0 / self.num_particles
             new_particles.append(new_particle)
         
@@ -339,37 +298,32 @@ class ParticleFilter(Node):
 
     def effective_sample_size(self):
         """Calcular tamaño efectivo de muestra"""
-        sum_weights_squared = sum(p.weight**2 for p in self.particles)
-        return 1.0 / sum_weights_squared if sum_weights_squared > 0 else 0
+        weights = np.array([p.weight for p in self.particles])
+        if np.sum(weights) == 0:
+            return self.num_particles
+        weights /= np.sum(weights)
+        return 1.0 / np.sum(weights ** 2)
 
     def calculate_confidence(self):
         """Calcular confianza de localización"""
         if len(self.particles) == 0:
             return 0.0
         
-        # Calcular centroide ponderado
-        sum_x = sum(p.x * p.weight for p in self.particles)
-        sum_y = sum(p.y * p.weight for p in self.particles)
-        sum_w = sum(p.weight for p in self.particles)
-        
-        if sum_w == 0:
+        weights = np.array([p.weight for p in self.particles])
+        if np.sum(weights) == 0:
             return 0.0
         
-        centroid_x = sum_x / sum_w
-        centroid_y = sum_y / sum_w
+        weights /= np.sum(weights)
+        max_weight = np.max(weights)
         
-        # Calcular dispersión
-        variance = sum(p.weight * ((p.x - centroid_x)**2 + (p.y - centroid_y)**2) for p in self.particles) / sum_w
-        
-        # Convertir varianza a confianza
-        confidence = np.exp(-variance * 20)  # Factor ajustado para convergencia
-        return min(1.0, max(0.0, confidence))
+        return min(max_weight * 10, 1.0)
 
     def publish_particles(self):
         """Publicar partículas para visualización"""
         pose_array = PoseArray()
+        pose_array.header = Header()
+        pose_array.header.frame_id = "odom"
         pose_array.header.stamp = self.get_clock().now().to_msg()
-        pose_array.header.frame_id = 'odom'
         
         for particle in self.particles:
             pose = Pose()
@@ -395,29 +349,20 @@ class ParticleFilter(Node):
         # Encontrar partícula con mayor peso
         best_particle = max(self.particles, key=lambda p: p.weight)
         
-        point = PointStamped()
-        point.header.stamp = self.get_clock().now().to_msg()
-        point.header.frame_id = 'odom'
-        point.point.x = best_particle.x
-        point.point.y = best_particle.y
-        point.point.z = 0.0
+        point_msg = PointStamped()
+        point_msg.header.frame_id = "odom"
+        point_msg.header.stamp = self.get_clock().now().to_msg()
+        point_msg.point.x = best_particle.x
+        point_msg.point.y = best_particle.y
+        point_msg.point.z = 0.0
         
-        self.best_pose_pub.publish(point)
+        self.best_pose_pub.publish(point_msg)
 
     def publish_confidence(self, confidence):
         """Publicar confianza de localización"""
-        conf_msg = Float64()
-        conf_msg.data = confidence
-        self.confidence_pub.publish(conf_msg)
-        
-        # Log cuando se alcanza alta confianza
-        if confidence > 0.8 and not self.localized:
-            self.localized = True
-            best_particle = max(self.particles, key=lambda p: p.weight)
-            self.get_logger().info(
-                f"¡Robot localizado! Confianza: {confidence:.3f} | "
-                f"Pose: ({best_particle.x:.3f}, {best_particle.y:.3f}, {best_particle.ang:.3f}rad)"
-            )
+        msg = Float64()
+        msg.data = confidence
+        self.confidence_pub.publish(msg)
 
 
 def main(args=None):
