@@ -26,10 +26,19 @@ class VisualizationManager(Node):
         self.create_subscription(PointStamped, '/best_pose', self.best_pose_callback, 10)
         self.create_subscription(Float64, '/localization_confidence', self.confidence_callback, 10)
         
-        # Publicadores
-        self.particles_marker_pub = self.create_publisher(MarkerArray, '/particles_markers', 10)
-        self.best_pose_marker_pub = self.create_publisher(Marker, '/best_pose_marker', 10)
-        self.confidence_text_pub = self.create_publisher(Marker, '/confidence_text', 10)
+        # Configurar QoS compatible con RViz
+        from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
+        
+        marker_qos = QoSProfile(
+            depth=10,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,  # Compatible con RViz
+            reliability=ReliabilityPolicy.RELIABLE
+        )
+        
+        # Publicadores con QoS corregido
+        self.particles_marker_pub = self.create_publisher(MarkerArray, '/particles_markers', marker_qos)
+        self.best_pose_marker_pub = self.create_publisher(Marker, '/best_pose_marker', marker_qos)
+        self.confidence_text_pub = self.create_publisher(Marker, '/confidence_text', marker_qos)
         
         # Timer para actualización periódica
         self.create_timer(0.5, self.update_confidence_display)
@@ -42,7 +51,7 @@ class VisualizationManager(Node):
         
         # Marker para limpiar partículas anteriores
         delete_marker = Marker()
-        delete_marker.header.frame_id = 'map'
+        delete_marker.header.frame_id = 'odom'  # Cambiar a odom
         delete_marker.header.stamp = self.get_clock().now().to_msg()
         delete_marker.ns = 'particles'
         delete_marker.action = Marker.DELETEALL
@@ -54,7 +63,7 @@ class VisualizationManager(Node):
         
         for i, pose in enumerate(msg.poses[::step]):
             marker = Marker()
-            marker.header.frame_id = 'map'
+            marker.header.frame_id = 'odom'  # Cambiar a odom
             marker.header.stamp = self.get_clock().now().to_msg()
             marker.ns = 'particles'
             marker.id = i + 1
@@ -64,31 +73,37 @@ class VisualizationManager(Node):
             # Pose de la partícula
             marker.pose = pose
             
-            # Tamaño de la flecha
-            marker.scale.x = 0.08  # Longitud
-            marker.scale.y = 0.02  # Ancho
-            marker.scale.z = 0.02  # Alto
+            # Tamaño de la flecha (más grande para ser visible)
+            marker.scale.x = 0.15  # Longitud aumentada
+            marker.scale.y = 0.03  # Ancho aumentado
+            marker.scale.z = 0.03  # Alto aumentado
             
-            # Color azul con transparencia
+            # Color azul brillante con menos transparencia
             marker.color.r = 0.0
-            marker.color.g = 0.3
+            marker.color.g = 0.4
             marker.color.b = 1.0
-            marker.color.a = 0.6
+            marker.color.a = 0.8  # Menos transparente
             
-            # Tiempo de vida
-            marker.lifetime = rclpy.duration.Duration(seconds=self.particle_lifetime).to_msg()
+            # Tiempo de vida más largo
+            marker.lifetime = rclpy.duration.Duration(seconds=2.0).to_msg()
             
             marker_array.markers.append(marker)
         
         self.particle_count = num_particles
         self.particles_marker_pub.publish(marker_array)
+        
+        # Log de debugging
+        self.get_logger().info(
+            f"Publicando {len(marker_array.markers)-1} marcadores de {num_particles} partículas",
+            throttle_duration_sec=3.0
+        )
 
     def best_pose_callback(self, msg):
         """Visualizar mejor estimación de pose"""
         self.best_pose = msg
         
         marker = Marker()
-        marker.header.frame_id = 'map'
+        marker.header.frame_id = 'odom'  # Cambiar a odom
         marker.header.stamp = self.get_clock().now().to_msg()
         marker.ns = 'best_pose'
         marker.id = 0
@@ -99,19 +114,19 @@ class VisualizationManager(Node):
         marker.pose.position = msg.point
         marker.pose.orientation.w = 1.0
         
-        # Tamaño
-        marker.scale.x = 0.15
-        marker.scale.y = 0.15
-        marker.scale.z = 0.15
+        # Tamaño más grande para ser visible
+        marker.scale.x = 0.2
+        marker.scale.y = 0.2
+        marker.scale.z = 0.2
         
         # Color verde brillante
         marker.color.r = 0.0
         marker.color.g = 1.0
         marker.color.b = 0.0
-        marker.color.a = 0.9
+        marker.color.a = 1.0  # Sin transparencia
         
-        # Tiempo de vida
-        marker.lifetime = rclpy.duration.Duration(seconds=2.0).to_msg()
+        # Tiempo de vida más largo
+        marker.lifetime = rclpy.duration.Duration(seconds=3.0).to_msg()
         
         self.best_pose_marker_pub.publish(marker)
 
@@ -122,17 +137,17 @@ class VisualizationManager(Node):
     def update_confidence_display(self):
         """Actualizar display de confianza y estado"""
         marker = Marker()
-        marker.header.frame_id = 'map'
+        marker.header.frame_id = 'odom'  # Cambiar a odom
         marker.header.stamp = self.get_clock().now().to_msg()
         marker.ns = 'confidence_info'
         marker.id = 0
         marker.type = Marker.TEXT_VIEW_FACING
         marker.action = Marker.ADD
         
-        # Posición del texto (esquina superior del mapa)
-        marker.pose.position.x = 0.5
-        marker.pose.position.y = 2.5
-        marker.pose.position.z = 0.8
+        # Posición del texto (relativa al robot)
+        marker.pose.position.x = 1.0
+        marker.pose.position.y = 0.0
+        marker.pose.position.z = 1.0
         marker.pose.orientation.w = 1.0
         
         # Determinar estado basado en confianza
@@ -149,29 +164,28 @@ class VisualizationManager(Node):
             status = "INICIALIZANDO"
             color = (1.0, 0.0, 0.0)  # Rojo
         
-        # Texto informativo
+        # Texto informativo más detallado
         marker.text = f"Confianza: {self.current_confidence:.3f}\n"
         marker.text += f"Estado: {status}\n"
         marker.text += f"Partículas: {self.particle_count}"
         
-        # Estilo del texto
-        marker.scale.z = 0.12  # Tamaño del texto
+        # Estilo del texto más grande
+        marker.scale.z = 0.15  # Tamaño del texto aumentado
         marker.color.r, marker.color.g, marker.color.b = color
         marker.color.a = 1.0
         
         # Tiempo de vida
-        marker.lifetime = rclpy.duration.Duration(seconds=1.0).to_msg()
+        marker.lifetime = rclpy.duration.Duration(seconds=1.5).to_msg()
         
         self.confidence_text_pub.publish(marker)
         
-        # Log ocasional para debugging
-        if self.particle_count > 0:
-            self.get_logger().info(
-                f"Confianza: {self.current_confidence:.3f}, "
-                f"Partículas: {self.particle_count}, "
-                f"Estado: {status}",
-                throttle_duration_sec=5.0
-            )
+        # Log mejorado para debugging
+        self.get_logger().info(
+            f"Estado: {status} | "
+            f"Confianza: {self.current_confidence:.3f} | "
+            f"Partículas: {self.particle_count}",
+            throttle_duration_sec=5.0
+        )
 
 
 def main(args=None):

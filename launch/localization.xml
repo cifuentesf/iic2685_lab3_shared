@@ -23,7 +23,7 @@
 
   <!-- RViz2 con configuración -->
   <node pkg="rviz2" exec="rviz2" name="rviz2" output="screen"
-        args="-d $(find-pkg-share iic2685_lab3)/rviz/configuration.rviz"/>
+        args="-d $(find-pkg-share iic2685_lab3)/rviz/simple_configuration.rviz"/>
 
     <!-- Recieves input from keyboard -->
   <!-- 

@@ -10,105 +10,48 @@ from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PoseArray, Pose, PointStamped
 from std_msgs.msg import Float64
 from tf_transformations import quaternion_from_euler, euler_from_quaternion
-from random import gauss
 
 
 class Particle:
-    """
-    Clase Particle optimizada para el filtro de partículas.
-    Basada en la versión de ayudantia_rviz pero mejorada para localización.
-    """
-    
+    """Clase partícula integrada (basada en ayudantia_rviz)"""
     def __init__(self, x, y, ang, sigma=0.02):
-        """
-        Inicializar partícula
-        
-        Args:
-            x (float): Posición x en metros
-            y (float): Posición y en metros  
-            ang (float): Ángulo en radianes
-            sigma (float): Desviación estándar para ruido de movimiento
-        """
-        self.x = x
-        self.y = y
-        self.ang = ang
-        self.weight = 1.0  # Peso de la partícula para el filtro
+        self.x, self.y, self.ang = x, y, ang
+        self.weight = 1.0
         self.sigma = sigma
-        
-        # Historial para debugging si es necesario
-        self.last_x = x
-        self.last_y = y
-        self.last_ang = ang
+        # Historial para debugging
+        self.last_x, self.last_y, self.last_ang = x, y, ang
 
     def move(self, delta_x, delta_y, delta_ang):
-        """
-        Aplicar modelo de movimiento con ruido gaussiano
-        
-        Args:
-            delta_x (float): Cambio en x
-            delta_y (float): Cambio en y
-            delta_ang (float): Cambio en ángulo
-        """
-        # Guardar posición anterior
-        self.last_x = self.x
-        self.last_y = self.y
-        self.last_ang = self.ang
-        
-        # Aplicar movimiento con ruido
+        """Aplicar modelo de movimiento con ruido gaussiano"""
+        self.last_x, self.last_y, self.last_ang = self.x, self.y, self.ang
         self.x += delta_x + gauss(0, self.sigma)
         self.y += delta_y + gauss(0, self.sigma)
-        self.ang += delta_ang + gauss(0, self.sigma * 0.5)  # Menos ruido angular
-        
-        # Normalizar ángulo
+        self.ang += delta_ang + gauss(0, self.sigma * 0.5)
         self.ang = self.normalize_angle(self.ang)
 
     def pos(self):
-        """Retornar posición actual como lista"""
         return [self.x, self.y, self.ang]
 
     def last_pos(self):
-        """Retornar posición anterior como lista"""
         return [self.last_x, self.last_y, self.last_ang]
     
     def distance_to(self, other_particle):
-        """
-        Calcular distancia euclidiana a otra partícula
-        
-        Args:
-            other_particle (Particle): Otra partícula
-            
-        Returns:
-            float: Distancia euclidiana
-        """
+        """Calcular distancia euclidiana a otra partícula"""
         dx = self.x - other_particle.x
         dy = self.y - other_particle.y
         return np.sqrt(dx*dx + dy*dy)
     
     def copy(self):
-        """
-        Crear copia de la partícula
-        
-        Returns:
-            Particle: Nueva partícula con los mismos valores
-        """
+        """Crear copia de la partícula"""
         new_particle = Particle(self.x, self.y, self.ang, self.sigma)
         new_particle.weight = self.weight
-        new_particle.last_x = self.last_x
-        new_particle.last_y = self.last_y
-        new_particle.last_ang = self.last_ang
+        new_particle.last_x, new_particle.last_y, new_particle.last_ang = self.last_x, self.last_y, self.last_ang
         return new_particle
     
     def add_noise(self, position_noise=None, angle_noise=None):
-        """
-        Añadir ruido adicional a la partícula
-        
-        Args:
-            position_noise (float): Ruido posicional (usa self.sigma si es None)
-            angle_noise (float): Ruido angular (usa self.sigma*0.5 si es None)
-        """
+        """Añadir ruido adicional a la partícula"""
         pos_noise = position_noise if position_noise is not None else self.sigma
         ang_noise = angle_noise if angle_noise is not None else self.sigma * 0.5
-        
         self.x += gauss(0, pos_noise)
         self.y += gauss(0, pos_noise)  
         self.ang += gauss(0, ang_noise)
@@ -116,15 +59,7 @@ class Particle:
     
     @staticmethod
     def normalize_angle(angle):
-        """
-        Normalizar ángulo al rango [-π, π]
-        
-        Args:
-            angle (float): Ángulo en radianes
-            
-        Returns:
-            float: Ángulo normalizado
-        """
+        """Normalizar ángulo al rango [-π, π]"""
         while angle > np.pi:
             angle -= 2 * np.pi
         while angle < -np.pi:
@@ -132,12 +67,8 @@ class Particle:
         return angle
     
     def __str__(self):
-        """Representación en string para debugging"""
         return f"Particle(x={self.x:.3f}, y={self.y:.3f}, ang={self.ang:.3f}, w={self.weight:.6f})"
-    
-    def __repr__(self):
-        """Representación para debugging"""
-        return self.__str__()
+
 
 class ParticleFilter(Node):
     def __init__(self):
@@ -280,42 +211,24 @@ class ParticleFilter(Node):
         self.last_odom = msg
 
     def likelihood_field_model(self, particle, scan):
-        """Modelo de sensor usando campos de verosimilitud con 5 sectores optimizado"""
+        """Modelo de sensor simplificado y más permisivo"""
         if scan is None:
-            return 1.0
+            return 0.1  # Peso bajo pero no cero
             
-        log_likelihood = 0.0
         num_beams = len(scan.ranges)
+        if num_beams == 0:
+            return 0.1
         
-        # Usar 5 sectores para consistencia con navegación
-        # Tomar solo algunos rayos de cada sector para eficiencia
-        sector_size = num_beams // 5
+        # Usar menos rayos para eficiencia y menos restricción
+        step = max(1, num_beams // 15)  # Solo ~15 rayos
+        total_likelihood = 0.0
+        valid_beams = 0
         
-        # Seleccionar rayos representativos de cada sector
-        selected_indices = [
-            sector_size // 2,          # Right center
-            sector_size + sector_size // 2,  # Right-front center  
-            2 * sector_size + sector_size // 2,  # Front center
-            3 * sector_size + sector_size // 2,  # Left-front center
-            4 * sector_size + sector_size // 2   # Left center
-        ]
-        
-        # Añadir algunos rayos adicionales del sector frontal (más importante)
-        front_start = 2 * sector_size
-        front_end = 3 * sector_size
-        front_step = max(1, (front_end - front_start) // 5)
-        for i in range(front_start, front_end, front_step):
-            if i < num_beams:
-                selected_indices.append(i)
-        
-        for i in selected_indices:
-            if i >= num_beams:
-                continue
-                
+        for i in range(0, num_beams, step):
             z = scan.ranges[i]
             
-            # Ignorar lecturas inválidas
-            if not np.isfinite(z) or z <= scan.range_min or z >= scan.range_max:
+            # Ignorar lecturas inválidas pero ser más permisivo
+            if not np.isfinite(z) or z <= 0.1 or z >= 3.5:
                 continue
                 
             # Calcular posición del punto final del rayo
@@ -323,21 +236,28 @@ class ParticleFilter(Node):
             x_hit = particle.x + z * np.cos(angle)
             y_hit = particle.y + z * np.sin(angle)
             
-            # Distancia al obstáculo más cercano
-            dist_to_obstacle = self.distance_to_nearest_obstacle(x_hit, y_hit)
+            # Modelo simplificado: si el punto está en espacio libre, likelihood alto
+            if self.is_free_space(x_hit, y_hit):
+                likelihood = 0.8  # Alto likelihood para espacio libre
+            else:
+                # Si está en obstáculo, dar likelihood basado en distancia
+                dist_to_obstacle = self.distance_to_nearest_obstacle(x_hit, y_hit)
+                if dist_to_obstacle < 0.05:  # Muy cerca de obstáculo
+                    likelihood = 0.9  # Alto likelihood
+                elif dist_to_obstacle < 0.15:  # Cerca de obstáculo
+                    likelihood = 0.6  # Likelihood medio
+                else:
+                    likelihood = 0.3  # Likelihood bajo
             
-            # Likelihood gaussiano con pesos por sector
-            weight = 1.0
-            # Dar más peso a mediciones frontales
-            if 2 * sector_size <= i < 3 * sector_size:  # Sector frontal
-                weight = 2.0
-            elif sector_size <= i < 4 * sector_size:  # Sectores frontales laterales
-                weight = 1.5
-                
-            likelihood = np.exp(-0.5 * (dist_to_obstacle / self.sigma_sensor) ** 2)
-            log_likelihood += weight * np.log(likelihood + 1e-10)
+            total_likelihood += likelihood
+            valid_beams += 1
         
-        return np.exp(log_likelihood)
+        if valid_beams == 0:
+            return 0.1
+            
+        # Normalizar y asegurar valor mínimo
+        avg_likelihood = total_likelihood / valid_beams
+        return max(0.01, avg_likelihood)  # Mínimo 0.01
 
     def distance_to_nearest_obstacle(self, x, y):
         """Distancia al obstáculo más cercano (versión simplificada)"""
@@ -457,7 +377,7 @@ class ParticleFilter(Node):
         """Publicar partículas para visualización"""
         pose_array = PoseArray()
         pose_array.header.stamp = self.get_clock().now().to_msg()
-        pose_array.header.frame_id = 'map'
+        pose_array.header.frame_id = 'odom'  # Cambiar a odom para evitar problemas de frame
         
         for particle in self.particles:
             pose = Pose()
@@ -474,6 +394,17 @@ class ParticleFilter(Node):
             pose_array.poses.append(pose)
         
         self.particles_pub.publish(pose_array)
+        
+        # Debug info
+        if len(self.particles) > 0:
+            max_weight = max(p.weight for p in self.particles)
+            avg_weight = sum(p.weight for p in self.particles) / len(self.particles)
+            self.get_logger().info(
+                f"Partículas: {len(self.particles)}, "
+                f"Peso máx: {max_weight:.6f}, "
+                f"Peso prom: {avg_weight:.6f}",
+                throttle_duration_sec=2.0
+            )
 
     def publish_best_pose(self):
         """Publicar mejor estimación de pose"""
@@ -485,12 +416,19 @@ class ParticleFilter(Node):
         
         point = PointStamped()
         point.header.stamp = self.get_clock().now().to_msg()
-        point.header.frame_id = 'map'
+        point.header.frame_id = 'odom'  # Cambiar a odom
         point.point.x = best_particle.x
         point.point.y = best_particle.y
         point.point.z = 0.0
         
         self.best_pose_pub.publish(point)
+        
+        # Debug info
+        self.get_logger().info(
+            f"Mejor pose: ({best_particle.x:.3f}, {best_particle.y:.3f}, {best_particle.ang:.3f}rad), "
+            f"Peso: {best_particle.weight:.6f}",
+            throttle_duration_sec=2.0
+        )
 
     def publish_confidence(self, confidence):
         """Publicar confianza de localización"""
