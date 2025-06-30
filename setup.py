@@ -28,6 +28,7 @@ setup(
         'console_scripts': [
             'particle_filter.py = iic2685_lab3.particle_filter:main',
             'navigator.py = iic2685_lab3.navigator:main',
+            'simple_navigator.py = iic2685_lab3.simple_navigator:main',
             'visualization_manager.py = iic2685_lab3.visualization_manager:main',
         ],
     },
