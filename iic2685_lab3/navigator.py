@@ -3,120 +3,134 @@
 import rclpy
 from rclpy.node import Node
 import numpy as np
-import math
 from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Twist
 from std_msgs.msg import Float64
 
-class Navigation(Node):
-    
+
+class Navigator(Node):
     def __init__(self):
-        super().__init__('navigation')
+        super().__init__('navigator')
         
-        # Parámetros
-        self.linear_speed = 0.3          # [m/s]
-        self.max_angular_speed = 1.0     # [rad/s]
-        self.desired_wall_distance = 0.3 # [m]
-        self.min_front_distance = 0.3   # [m]
+        # Parámetros simplificados
+        self.linear_speed = 0.25
+        self.max_angular_speed = 0.8
+        self.wall_distance = 0.35
+        self.front_threshold = 0.4
+        self.side_threshold = 0.25
         
-        # Estado de navegación
+        # Estado
         self.exploration_active = True
-        self.current_laser_scan = None
-        self.turning = False
+        self.current_scan = None
+        self.state = "wall_following"  # Estados: wall_following, turning_right, turning_left
         
         # Suscriptores
-        self.laser_subscriber = self.create_subscription(
-            LaserScan, '/scan', self.laser_callback, 10)
-        self.confidence_subscriber = self.create_subscription(
-            Float64, '/localization_confidence', self.confidence_callback, 10)
+        self.create_subscription(LaserScan, '/scan', self.laser_callback, 10)
+        self.create_subscription(Float64, '/localization_confidence', self.confidence_callback, 10)
         
-        # Publicadores
-        self.cmd_vel_publisher = self.create_publisher(Twist, '/cmd_vel', 10)
+        # Publicador
+        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         
-        # Timer para control de navegación
-        self.navigation_timer = self.create_timer(0.2, self.navigation_control_loop)
+        # Timer para control
+        self.create_timer(0.1, self.control_loop)
         
-        self.get_logger().info("Navegación Reactiva inicializada")
+        self.get_logger().info("Navegador reactivo iniciado")
         
     def laser_callback(self, msg):
-        """Callback LIDAR"""
-        self.current_laser_scan = msg
+        """Callback para datos LIDAR"""
+        self.current_scan = msg
         
     def confidence_callback(self, msg):
-        # Si la confianza es muy alta, detener exploración
+        """Callback para confianza de localización"""
         if msg.data > 0.8 and self.exploration_active:
             self.exploration_active = False
-            self.get_logger().info(f"Alta confianza detectada ({msg.data:.3f}). Deteniendo exploración.")
-        
-    def navigation_control_loop(self):
-        if not self.exploration_active or self.current_laser_scan is None:
+            self.get_logger().info(f"Localización completada (confianza: {msg.data:.3f}). Deteniendo exploración.")
+            
+    def control_loop(self):
+        """Loop principal de control"""
+        if not self.exploration_active:
             self.stop_robot()
             return
-
-        self.reactive_wall_following()
+            
+        if self.current_scan is None:
+            return
+            
+        self.reactive_navigation()
         
-    def reactive_wall_following(self):
-
-        scan = self.current_laser_scan
-        ranges = np.array(scan.ranges)
+    def reactive_navigation(self):
+        """Navegación reactiva simple"""
+        ranges = np.array(self.current_scan.ranges)
         
         # Filtrar lecturas inválidas
-        valid_ranges = ranges.copy()
-        valid_ranges[valid_ranges >= scan.range_max] = scan.range_max
-        valid_ranges[valid_ranges <= scan.range_min] = scan.range_max
+        ranges[ranges >= self.current_scan.range_max] = self.current_scan.range_max
+        ranges[ranges <= self.current_scan.range_min] = self.current_scan.range_max
+        ranges[~np.isfinite(ranges)] = self.current_scan.range_max
         
-        # Dividir el escaneo en regiones
-        n_rays = len(valid_ranges)
-        third = n_rays // 3
+        # Dividir escaneo en regiones
+        n = len(ranges)
+        front_ranges = ranges[n//3:2*n//3]
+        right_ranges = ranges[2*n//3:]
+        left_ranges = ranges[:n//3]
         
-        left_ranges = valid_ranges[:third]
-        front_ranges = valid_ranges[third:2*third]
-        right_ranges = valid_ranges[2*third:]
-        
-        # Distancias mínimas en cada región
+        # Distancias mínimas
         front_dist = np.min(front_ranges)
-        left_dist = np.min(left_ranges)
         right_dist = np.min(right_ranges)
+        left_dist = np.min(left_ranges)
         
         cmd = Twist()
         
-        if front_dist < self.min_front_distance:
-            # Obstáculo de frente
-            if not self.turning:
-                self.turning = True
-            
-            # Rotar hacia el lado con más espacio
-            if right_dist > left_dist:
-                cmd.angular.z = -self.max_angular_speed  # Girar a la derecha
+        # Lógica de navegación basada en estados
+        if self.state == "wall_following":
+            if front_dist < self.front_threshold:
+                # Obstáculo adelante - decidir dirección
+                if right_dist > left_dist:
+                    self.state = "turning_right"
+                else:
+                    self.state = "turning_left"
             else:
-                cmd.angular.z = self.max_angular_speed   # Girar a la izquierda
+                # Seguir pared derecha
+                if right_dist > self.wall_distance * 1.5:
+                    # No hay pared derecha - girar derecha para buscarla
+                    cmd.linear.x = self.linear_speed * 0.7
+                    cmd.angular.z = -0.5
+                elif right_dist < self.side_threshold:
+                    # Muy cerca de la pared - alejarse
+                    cmd.linear.x = self.linear_speed * 0.8
+                    cmd.angular.z = 0.3
+                else:
+                    # Seguir adelante con corrección proporcional
+                    error = right_dist - self.wall_distance
+                    cmd.linear.x = self.linear_speed
+                    cmd.angular.z = -0.8 * error  # Control proporcional
+                    
+        elif self.state == "turning_right":
+            cmd.angular.z = -self.max_angular_speed
             cmd.linear.x = 0.0
-            
-        else:
-            # Camino libre
-            if self.turning:
-                self.turning = False
-            
-            # Seguir la pared derecha a distancia fija
-            error = right_dist - self.desired_wall_distance
-            
-            # Control proporcional simple para seguimiento de pared
-            cmd.linear.x = self.linear_speed
-            cmd.angular.z = -0.5 * error  # e*Kp
-
-            cmd.angular.z = max(-self.max_angular_speed, min(self.max_angular_speed, cmd.angular.z))
+            # Volver a seguimiento cuando hay espacio adelante
+            if front_dist > self.front_threshold * 1.2:
+                self.state = "wall_following"
+                
+        elif self.state == "turning_left":
+            cmd.angular.z = self.max_angular_speed
+            cmd.linear.x = 0.0
+            # Volver a seguimiento cuando hay espacio adelante
+            if front_dist > self.front_threshold * 1.2:
+                self.state = "wall_following"
         
-        self.cmd_vel_publisher.publish(cmd)
+        # Limitar velocidades
+        cmd.angular.z = np.clip(cmd.angular.z, -self.max_angular_speed, self.max_angular_speed)
+        
+        self.cmd_pub.publish(cmd)
         
     def stop_robot(self):
+        """Detener el robot"""
         cmd = Twist()
-        cmd.linear.x = 0.0
-        cmd.angular.z = 0.0
-        self.cmd_vel_publisher.publish(cmd)
+        self.cmd_pub.publish(cmd)
+
 
 def main(args=None):
     rclpy.init(args=args)
-    navigator = Navigation()
+    navigator = Navigator()
     
     try:
         rclpy.spin(navigator)
