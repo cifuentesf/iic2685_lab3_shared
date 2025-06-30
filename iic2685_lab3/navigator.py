@@ -44,7 +44,7 @@ class Navigator(Node):
         self.best_pose_sub = self.create_subscription(PointStamped, '/best_pose', self.best_pose_callback, 10)
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.create_timer(0.1, self.control_loop)
-        self.get_logger().info("Navegador iniciado - Fase de filtrado inicial")
+        self.get_logger().info("Navegador iniciado")
 
     def laser_callback(self, msg):
         self.current_scan = msg
