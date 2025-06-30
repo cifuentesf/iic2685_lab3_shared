@@ -20,7 +20,7 @@ class Simple_Navigator(Node):
         self.time_advance = self.step_distance / self.linear_speed
         
         # Seguimiento de muro
-        self.desired_wall_distance = 0.4
+        self.desired_wall_distance = 0.5
         self.wall_following_active = True  
         
         # Control PID
@@ -58,7 +58,15 @@ class Simple_Navigator(Node):
         self.get_logger().info("Navegador mejorado iniciado")
 
     def odom_callback(self, msg):
-        pass  # Mantenemos por compatibilidad
+        """Procesa la odometría para obtener la orientación del robot"""
+        self.current_odom = msg
+        self.current_position = msg.pose.pose.position
+        self.current_theta = euler_from_quaternion((
+            msg.pose.pose.orientation.x,
+            msg.pose.pose.orientation.y,
+            msg.pose.pose.orientation.z,
+            msg.pose.pose.orientation.w
+        ))[2]
 
     def laser_callback(self, msg):
         self.current_scan = msg
