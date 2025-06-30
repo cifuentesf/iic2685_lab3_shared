@@ -283,37 +283,32 @@ class Navigator(Node):
             self.get_logger().info(f"Movimiento completado. Volviendo a filtrado (paso {self.step_count})")
 
     def continuous_navigation(self):
-        """Navegación reactiva continua con 5 sectores después de localización"""
+        """Navegación reactiva continua basada en simple_navigator.py (post-localización)"""
         if self.current_scan is None:
             return
             
         cmd = Twist()
         
-        # Detectar obstáculos frontales usando 3 sectores frontales
-        frontal_clear = (self.front_distance > self.collision_distance and 
-                        self.left_front_distance > self.collision_distance and 
-                        self.right_front_distance > self.collision_distance)
+        # Detección de obstáculo frontal crítico
+        front_blocked = self.front_distance < self.front_collision_distance
         
-        if not frontal_clear:
-            # Obstáculo frontal detectado - maniobra evasiva
+        if front_blocked:
+            # Obstáculo frontal crítico - maniobra evasiva
             left_space = min(self.left_distance, self.left_front_distance)
             right_space = min(self.right_distance, self.right_front_distance)
             
             if left_space > right_space + 0.1:
-                # Más espacio a la izquierda
-                cmd.angular.z = 0.5
-                cmd.linear.x = 0.05  # Avance muy lento mientras gira
+                cmd.angular.z = 0.5   # Girar izquierda
+                cmd.linear.x = 0.05   # Avance muy lento
             elif right_space > left_space + 0.1:
-                # Más espacio a la derecha  
-                cmd.angular.z = -0.5
-                cmd.linear.x = 0.05
+                cmd.angular.z = -0.5  # Girar derecha  
+                cmd.linear.x = 0.05   # Avance muy lento
             else:
-                # Espacios similares - giro más agresivo hacia la izquierda (preferencia)
-                cmd.angular.z = 0.6
+                cmd.angular.z = 0.6   # Giro más agresivo hacia izquierda (preferencia)
                 cmd.linear.x = 0.0
                 
         elif self.left_distance < 1.2:  # Hay pared izquierda para seguir
-            # Seguimiento de pared izquierda con control PID mejorado
+            # Seguimiento de pared izquierda con control PID (estilo simple_navigator)
             current_time = self.get_clock().now()
             
             if self.last_time is not None:
@@ -353,7 +348,7 @@ class Navigator(Node):
         else:
             # No hay pared izquierda - buscar pared o explorar
             if self.right_distance < self.left_distance and self.right_distance < 1.5:
-                # Hay pared derecha más cerca - acercarse gradualmente
+                # Hay pared derecha más cerca - acercarse gradualmente para eventualmente seguirla
                 cmd.linear.x = self.linear_speed * 0.8
                 cmd.angular.z = -0.15  # Giro suave hacia la derecha
             else:
@@ -363,6 +358,29 @@ class Navigator(Node):
         
         # Publicar comando
         self.cmd_pub.publish(cmd)
+        
+        # Log ocasional para debugging
+        if hasattr(self, '_last_log_time'):
+            if (self.get_clock().now() - self._last_log_time).nanoseconds * 1e-9 > 3.0:
+                self._log_navigation_state(cmd)
+                self._last_log_time = self.get_clock().now()
+        else:
+            self._last_log_time = self.get_clock().now()
+    
+    def _log_navigation_state(self, cmd):
+        """Log del estado de navegación continua"""
+        if self.front_distance < self.front_collision_distance:
+            behavior = "EVITANDO_OBSTACULO"
+        elif self.left_distance < 1.2:
+            behavior = "SIGUIENDO_PARED_IZQ"
+        else:
+            behavior = "EXPLORANDO"
+            
+        self.get_logger().info(
+            f"Nav continua: {behavior} | "
+            f"Vel: lin={cmd.linear.x:.2f} ang={cmd.angular.z:.2f} | "
+            f"L:{self.left_distance:.2f} F:{self.front_distance:.2f} R:{self.right_distance:.2f}"
+        )
 
     def stop_robot(self):
         """Detener completamente el robot"""
