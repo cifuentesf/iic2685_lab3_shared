@@ -6,11 +6,13 @@ import numpy as np
 import cv2
 from random import uniform, gauss, choices
 from sensor_msgs.msg import LaserScan
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import Odometry, OccupancyGrid
 from geometry_msgs.msg import PoseArray, Pose, PointStamped
 from std_msgs.msg import Float64, Header
 from tf_transformations import quaternion_from_euler, euler_from_quaternion
 from scipy.spatial.distance import cdist
+import yaml
+import os
 
 
 class Particle:
@@ -56,134 +58,125 @@ class ParticleFilter(Node):
         self.particles = []
         self.map_data = None
         self.map_info = None
-        self.current_scan = None
+        self.likelihood_field = None
         self.last_odom = None
         self.prev_odom = None
+        self.current_scan = None
         
-        # Campo de verosimilitud precalculado
-        self.likelihood_field = None
+        # Subscribers
+        self.scan_sub = self.create_subscription(
+            LaserScan, '/scan', self.scan_callback, 10)
+        self.odom_sub = self.create_subscription(
+            Odometry, '/odom', self.odom_callback, 10)
+        self.map_sub = self.create_subscription(
+            OccupancyGrid, '/map', self.map_callback, 10)
         
-        # Cargar mapa y inicializar
-        self.load_map()
-        self.precompute_likelihood_field()
-        self.initialize_particles()
-        
-        # Suscriptores
-        self.create_subscription(LaserScan, '/scan', self.laser_callback, 10)
-        self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
-        
-        # Publicadores
+        # Publishers - CORRECCIÓN: Cambiar Pose por PointStamped
         self.particles_pub = self.create_publisher(PoseArray, '/particles', 10)
-        self.best_pose_pub = self.create_publisher(Pose, '/real_pose', 10)
+        self.best_pose_pub = self.create_publisher(PointStamped, '/best_pose', 10)  # ← CORREGIDO
         self.confidence_pub = self.create_publisher(Float64, '/localization_confidence', 10)
         
-        # Timer para MCL
-        self.create_timer(0.2, self.mcl_update)
+        # Timer para actualización MCL
+        self.create_timer(0.1, self.mcl_update)
         
-        self.get_logger().info(f"Filtro MCL iniciado con {self.num_particles} partículas")
+        # Cargar mapa
+        self.load_map()
+        
+        self.get_logger().info("Filtro MCL iniciado")
 
     def load_map(self):
-        """Cargar mapa desde archivo"""
+        """Cargar mapa desde archivo yaml"""
         try:
-            import os
-            from ament_index_python.packages import get_package_share_directory
+            # Buscar archivo de mapa en el paquete
+            map_path = "/home/mcifuentesf/ros2_ws/install/iic2685_lab3/share/iic2685_lab3/maps/mapa.yaml"
             
-            pkg_share = get_package_share_directory('iic2685_lab3')
-            map_path = os.path.join(pkg_share, 'maps', 'mapa.pgm')
+            with open(map_path, 'r') as file:
+                map_yaml = yaml.safe_load(file)
             
-            self.map_data = cv2.imread(map_path, cv2.IMREAD_GRAYSCALE)
+            # Cargar imagen del mapa
+            image_path = os.path.join(os.path.dirname(map_path), map_yaml['image'])
+            self.map_data = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+            
+            if self.map_data is None:
+                self.get_logger().error(f"No se pudo cargar la imagen del mapa: {image_path}")
+                return
             
             # Información del mapa
-            self.map_info = {
-                'resolution': 0.01,
-                'origin': [0.0, 0.0, 0.0],
-                'width': self.map_data.shape[1],
-                'height': self.map_data.shape[0]
-            }
+            self.map_resolution = map_yaml['resolution']
+            self.map_origin = map_yaml['origin']
             
-            self.get_logger().info(f"Mapa cargado: {self.map_info['width']}x{self.map_info['height']}")
+            self.get_logger().info(f"Mapa cargado: {self.map_data.shape[1]}x{self.map_data.shape[0]}")
+            
+            # Precalcular campo de verosimilitud
+            self.get_logger().info("Precalculando campo de verosimilitud...")
+            self.precompute_likelihood_field()
             
         except Exception as e:
             self.get_logger().error(f"Error cargando mapa: {e}")
-            # Mapa dummy
-            self.map_data = np.ones((270, 270), dtype=np.uint8) * 255
-            self.map_info = {'resolution': 0.01, 'origin': [0.0, 0.0, 0.0], 'width': 270, 'height': 270}
 
     def precompute_likelihood_field(self):
-        """Precalcular campo de verosimilitud - Likelihood Fields Model"""
-        self.get_logger().info("Precalculando campo de verosimilitud...")
-        
-        # Encontrar obstáculos
-        obstacle_pixels = np.where(self.map_data < 100)
-        
-        if len(obstacle_pixels[0]) == 0:
-            self.likelihood_field = np.ones_like(self.map_data, dtype=np.float32) * 0.1
+        """Precalcular campo de verosimilitud usando transformada de distancia"""
+        if self.map_data is None:
             return
         
-        # Crear campo de distancias
-        h, w = self.map_data.shape
-        y_coords, x_coords = np.mgrid[0:h, 0:w]
-        all_coords = np.column_stack([y_coords.ravel(), x_coords.ravel()])
-        obstacle_coords = np.column_stack([obstacle_pixels[0], obstacle_pixels[1]])
+        # Binarizar mapa (0 = obstáculo, 255 = libre)
+        binary_map = (self.map_data > 127).astype(np.uint8) * 255
         
-        # Calcular distancias mínimas eficientemente
-        distances = cdist(all_coords, obstacle_coords, metric='euclidean')
-        min_distances = np.min(distances, axis=1)
+        # Calcular transformada de distancia
+        dist_transform = cv2.distanceTransform(binary_map, cv2.DIST_L2, 5)
         
-        # Aplicar distribución gaussiana
-        likelihood_values = np.exp(-0.5 * (min_distances / (self.sigma_hit / self.map_info['resolution'])) ** 2)
-        self.likelihood_field = likelihood_values.reshape(h, w).astype(np.float32)
+        # Convertir a campo de verosimilitud gaussiano
+        self.likelihood_field = np.exp(-0.5 * (dist_transform / self.sigma_hit) ** 2)
         
         self.get_logger().info("Campo de verosimilitud calculado")
+        
+        # Inicializar partículas uniformemente en el mapa
+        self.initialize_particles()
 
     def initialize_particles(self):
-        """Inicializar partículas en espacio libre"""
+        """Inicializar partículas uniformemente en espacios libres"""
+        if self.map_data is None:
+            return
+        
         self.particles = []
-        attempts = 0
-        max_attempts = self.num_particles * 10
         
-        while len(self.particles) < self.num_particles and attempts < max_attempts:
-            x = uniform(0.5, 2.0)
-            y = uniform(0.5, 2.0)
-            ang = uniform(-np.pi, np.pi)
+        # Encontrar píxeles libres (valores > 127 en escala de grises)
+        free_pixels = np.where(self.map_data > 127)
+        
+        for _ in range(self.num_particles):
+            # Seleccionar píxel libre aleatorio
+            idx = np.random.randint(0, len(free_pixels[0]))
+            map_y, map_x = free_pixels[0][idx], free_pixels[1][idx]
             
-            if self.is_free_space(x, y):
-                particle = Particle(x, y, ang, self.sigma_motion)
-                particle.weight = 1.0 / self.num_particles
-                self.particles.append(particle)
-                
-            attempts += 1
-        
-        # Completar con posiciones aleatorias si es necesario
-        while len(self.particles) < self.num_particles:
-            x = uniform(0.5, 2.0)
-            y = uniform(0.5, 2.0)
-            ang = uniform(-np.pi, np.pi)
-            particle = Particle(x, y, ang, self.sigma_motion)
+            # Convertir a coordenadas del mundo
+            world_x = map_x * self.map_resolution + self.map_origin[0]
+            world_y = (self.map_data.shape[0] - map_y) * self.map_resolution + self.map_origin[1]
+            
+            # Orientación aleatoria
+            theta = uniform(-np.pi, np.pi)
+            
+            particle = Particle(world_x, world_y, theta, self.sigma_motion)
             particle.weight = 1.0 / self.num_particles
             self.particles.append(particle)
-
-    def is_free_space(self, x, y):
-        """Verificar si posición está en espacio libre"""
-        px = int((x - self.map_info['origin'][0]) / self.map_info['resolution'])
-        py = int((y - self.map_info['origin'][1]) / self.map_info['resolution'])
         
-        if px < 0 or px >= self.map_info['width'] or py < 0 or py >= self.map_info['height']:
-            return False
-        
-        return self.map_data[py, px] > 200
+        self.get_logger().info(f"Filtro MCL iniciado con {self.num_particles} partículas")
 
-    def laser_callback(self, msg):
-        """Callback para datos del LIDAR"""
+    def scan_callback(self, msg):
+        """Callback para datos del láser"""
         self.current_scan = msg
 
     def odom_callback(self, msg):
         """Callback para odometría"""
         self.last_odom = msg
 
+    def map_callback(self, msg):
+        """Callback para mapa (si se recibe por tópico)"""
+        pass  # Ya cargamos el mapa desde archivo
+
     def mcl_update(self):
-        """Algoritmo MCL principal"""
-        if self.current_scan is None or len(self.particles) == 0:
+        """Actualización principal del filtro MCL"""
+        if (self.map_data is None or self.likelihood_field is None or 
+            self.current_scan is None or len(self.particles) == 0):
             return
         
         # 1. Motion Update (Predicción)
@@ -240,43 +233,48 @@ class ParticleFilter(Node):
         ranges = np.array(self.current_scan.ranges)
         ranges[~np.isfinite(ranges)] = self.z_max
         ranges[ranges <= 0.0] = self.z_max
-        ranges = np.clip(ranges, 0.1, self.z_max)
+        ranges[ranges > self.z_max] = self.z_max
+        
+        angle_min = self.current_scan.angle_min
+        angle_increment = self.current_scan.angle_increment
         
         # Submuestrear lecturas para eficiencia
-        angle_min = self.current_scan.angle_min
-        angle_inc = self.current_scan.angle_increment
-        step = max(1, len(ranges) // 20)  # Usar ~20 rayos
+        step = max(1, len(ranges) // 36)  # ~36 rayos
         
         for particle in self.particles:
-            likelihood = 1.0
+            log_likelihood = 0.0
             
             for i in range(0, len(ranges), step):
-                z = ranges[i]
-                if z >= self.z_max:
+                if not np.isfinite(ranges[i]) or ranges[i] <= 0.0 or ranges[i] >= self.z_max:
                     continue
                 
-                # Calcular punto de impacto esperado
-                angle = angle_min + i * angle_inc + particle.ang
-                x_hit = particle.x + z * np.cos(angle)
-                y_hit = particle.y + z * np.sin(angle)
+                # Ángulo del rayo en el marco del robot
+                ray_angle = angle_min + i * angle_increment
+                
+                # Punto final del rayo en coordenadas del mundo
+                end_x = particle.x + ranges[i] * np.cos(particle.ang + ray_angle)
+                end_y = particle.y + ranges[i] * np.sin(particle.ang + ray_angle)
                 
                 # Convertir a coordenadas del mapa
-                px = int((x_hit - self.map_info['origin'][0]) / self.map_info['resolution'])
-                py = int((y_hit - self.map_info['origin'][1]) / self.map_info['resolution'])
+                map_x = int((end_x - self.map_origin[0]) / self.map_resolution)
+                map_y = int((self.map_data.shape[0] - (end_y - self.map_origin[1]) / self.map_resolution))
                 
-                # Obtener likelihood del campo precalculado
-                if 0 <= px < self.map_info['width'] and 0 <= py < self.map_info['height']:
-                    p_hit = self.z_hit * self.likelihood_field[py, px]
-                else:
-                    p_hit = 0.0
-                
-                p_random = self.z_random / self.z_max
-                likelihood *= (p_hit + p_random)
+                # Verificar límites
+                if (0 <= map_x < self.likelihood_field.shape[1] and 
+                    0 <= map_y < self.likelihood_field.shape[0]):
+                    
+                    # Obtener verosimilitud del campo precalculado
+                    likelihood = self.likelihood_field[map_y, map_x]
+                    log_likelihood += np.log(self.z_hit * likelihood + self.z_random / self.z_max)
             
-            particle.weight = likelihood
+            # Actualizar peso de la partícula
+            particle.weight = np.exp(log_likelihood)
 
     def resample(self):
-        """Remuestreo por importancia"""
+        """Remuestreo de baja varianza"""
+        if len(self.particles) == 0:
+            return
+        
         weights = np.array([p.weight for p in self.particles])
         
         if np.sum(weights) == 0:
@@ -349,6 +347,7 @@ class ParticleFilter(Node):
         # Encontrar partícula con mayor peso
         best_particle = max(self.particles, key=lambda p: p.weight)
         
+        # CORRECCIÓN: Mantener PointStamped ya que el publisher ahora es correcto
         point_msg = PointStamped()
         point_msg.header.frame_id = "odom"
         point_msg.header.stamp = self.get_clock().now().to_msg()

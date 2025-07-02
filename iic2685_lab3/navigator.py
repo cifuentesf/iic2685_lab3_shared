@@ -11,56 +11,86 @@ from geometry_msgs.msg import PointStamped
 class Navigator(Node):
     def __init__(self):
         super().__init__('navigator')
+        
+        # Parámetros de navegación
         self.step_distance = 0.15
         self.linear_speed = 0.12
         self.confidence_threshold = 0.8
         self.desired_wall_distance = 0.45
         self.collision_distance = 0.3
         self.front_collision_distance = 0.35
+        
+        # Parámetros PID para seguimiento de pared
         self.kp = 1.2
         self.ki = 0.01
         self.kd = 0.08
         self.integral_error = 0.0
         self.previous_error = 0.0
         self.last_time = None
-        self.state = "filtering"
+        
+        # Estado del navegador
+        self.state = "filtering"  # "filtering", "exploration", "localized"
         self.current_scan = None
         self.localization_confidence = 0.0
         self.filter_iterations = 0
         self.max_filter_iterations = 25
         self.step_count = 0
         self.localized_announced = False
+        
+        # Variables de movimiento
         self.movement_start_time = None
         self.movement_duration = 0.0
         self.is_moving = False
+        
+        # Distancias del láser
         self.left_distance = float('inf')
         self.left_front_distance = float('inf')
         self.front_distance = float('inf')
         self.right_front_distance = float('inf')
         self.right_distance = float('inf')
         self.left_wall_distance = float('inf')
-        self.scan_sub = self.create_subscription(LaserScan, '/scan', self.laser_callback, 10)
-        self.coef_sub = self.create_subscription(Float64, '/localization_confidence', self.confidence_callback, 10)
-        self.best_pose_sub = self.create_subscription(PointStamped, '/best_pose', self.best_pose_callback, 10)
+        
+        # Variables para mejor pose - CORRECCIÓN
+        self.best_pose = None
+        
+        # Subscribers
+        self.scan_sub = self.create_subscription(
+            LaserScan, '/scan', self.laser_callback, 10)
+        self.confidence_sub = self.create_subscription(
+            Float64, '/localization_confidence', self.confidence_callback, 10)
+        self.best_pose_sub = self.create_subscription(
+            PointStamped, '/best_pose', self.best_pose_callback, 10)  # CORRECCIÓN: PointStamped
+        
+        # Publisher
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        
+        # Timer para control
         self.create_timer(0.1, self.control_loop)
+        
         self.get_logger().info("Navegador iniciado")
 
     def laser_callback(self, msg):
+        """Callback para datos del láser"""
         self.current_scan = msg
         self.process_scan_data(msg)
 
     def process_scan_data(self, scan):
+        """Procesar datos del láser para extraer distancias por sectores"""
         if scan is None:
             return
+        
         ranges = np.array(scan.ranges)
         ranges[~np.isfinite(ranges)] = 4.0
         ranges[ranges <= 0.0] = 4.0
         ranges[ranges > 3.9] = 4.0
+        
         n = len(ranges)
         if n == 0:
             return
+        
+        # Dividir en 5 sectores
         sector_size = n // 5
+        
         sectors = {
             'left': ranges[4*sector_size:],
             'left_front': ranges[3*sector_size:4*sector_size],
@@ -68,31 +98,28 @@ class Navigator(Node):
             'right_front': ranges[sector_size:2*sector_size],
             'right': ranges[:sector_size]
         }
-        for name, sector_data in sectors.items():
-            valid_data = sector_data[sector_data < 3.9]
-            if len(valid_data) > 0:
-                distance = np.percentile(valid_data, 25)
-            else:
-                distance = float('inf')
-            if name == 'left':
-                self.left_distance = distance
-                self.left_wall_distance = distance
-            elif name == 'left_front':
-                self.left_front_distance = distance
-            elif name == 'front':
-                self.front_distance = distance
-            elif name == 'right_front':
-                self.right_front_distance = distance
-            elif name == 'right':
-                self.right_distance = distance
+        
+        # Calcular distancias mínimas por sector
+        self.left_distance = np.min(sectors['left']) if len(sectors['left']) > 0 else float('inf')
+        self.left_front_distance = np.min(sectors['left_front']) if len(sectors['left_front']) > 0 else float('inf')
+        self.front_distance = np.min(sectors['front']) if len(sectors['front']) > 0 else float('inf')
+        self.right_front_distance = np.min(sectors['right_front']) if len(sectors['right_front']) > 0 else float('inf')
+        self.right_distance = np.min(sectors['right']) if len(sectors['right']) > 0 else float('inf')
+        
+        # Distancia promedio a la pared izquierda para seguimiento
+        self.left_wall_distance = np.mean(sectors['left']) if len(sectors['left']) > 0 else float('inf')
 
     def confidence_callback(self, msg):
+        """Callback para confianza de localización"""
         self.localization_confidence = msg.data
-        if self.localization_confidence >= self.confidence_threshold:
-            if self.state != "localized" and not self.localized_announced:
+        
+        # Transiciones de estado
+        if self.state == "filtering" and self.localization_confidence > self.confidence_threshold:
+            if not self.localized_announced:
                 best_pose = self.estimate_robot_pose()
                 self.get_logger().info(
-                    f"¡ROBOT LOCALIZADO! Pose estimada: x={best_pose[0]:.3f}, y={best_pose[1]:.3f}, θ={best_pose[2]:.3f}"
+                    f"¡Robot localizado! Confianza: {self.localization_confidence:.3f}, "
+                    f"Pose estimada: x={best_pose[0]:.3f}, y={best_pose[1]:.3f}, θ={best_pose[2]:.3f}"
                 )
                 self.localized_announced = True
                 self.state = "localized"
@@ -101,18 +128,24 @@ class Navigator(Node):
             self.get_logger().info("Iniciando exploración reactiva")
 
     def best_pose_callback(self, msg):
+        """Callback para mejor pose estimada - CORRECCIÓN"""
         self.best_pose = msg
 
     def estimate_robot_pose(self):
-        x = self.best_pose.linear.x if hasattr(self, 'best_pose') else 0.0
-        y = self.best_pose.linear.y if hasattr(self, 'best_pose') else 0.0
-        theta = self.best_pose.angular.z if hasattr(self, 'best_pose') else 0.0
+        """Estimar pose del robot - CORRECCIÓN"""
+        if self.best_pose is not None:
+            x = self.best_pose.point.x  # CORRECCIÓN: point.x en lugar de linear.x
+            y = self.best_pose.point.y  # CORRECCIÓN: point.y en lugar de linear.y
+            theta = 0.0  # PointStamped no incluye orientación
+        else:
+            x = y = theta = 0.0
         return (x, y, theta)
 
     def control_loop(self):
+        """Bucle principal de control"""
         if self.current_scan is None:
             return
-        cmd = Twist()
+        
         if self.state == "filtering":
             self.filtering_behavior()
         elif self.state == "exploration":
@@ -121,6 +154,7 @@ class Navigator(Node):
             self.continuous_navigation()
 
     def filtering_behavior(self):
+        """Comportamiento durante la fase de filtrado (robot estático)"""
         cmd = Twist()
         cmd.linear.x = 0.0
         cmd.angular.z = 0.0
@@ -128,7 +162,9 @@ class Navigator(Node):
         self.filter_iterations += 1
 
     def exploration_behavior(self):
+        """Comportamiento de exploración reactiva"""
         current_time = self.get_clock().now()
+        
         if not self.is_moving:
             self.decide_next_movement()
             self.movement_start_time = current_time
@@ -138,87 +174,87 @@ class Navigator(Node):
             if elapsed < self.movement_duration:
                 self.execute_current_movement()
             else:
-                cmd = Twist()
-                self.cmd_pub.publish(cmd)
+                # Movimiento completado
                 self.is_moving = False
                 self.step_count += 1
-                self.get_logger().info(
-                    f"Paso {self.step_count} completado (confianza: {self.localization_confidence:.3f})"
-                )
 
     def decide_next_movement(self):
+        """Decidir próximo movimiento basado en sensores"""
+        # Movimiento reactivo simple
         if self.front_distance < self.front_collision_distance:
+            # Hay obstáculo al frente, rotar
             if self.left_distance > self.right_distance:
-                self.movement_type = "turn_left"
-                self.movement_duration = 1.5
+                self.current_movement = "turn_left"
+                self.movement_duration = 1.0  # 1 segundo de rotación
             else:
-                self.movement_type = "turn_right"
-                self.movement_duration = 1.5
+                self.current_movement = "turn_right"
+                self.movement_duration = 1.0
         else:
-            self.movement_type = "forward"
+            # Camino despejado, avanzar
+            self.current_movement = "forward"
             self.movement_duration = self.step_distance / self.linear_speed
 
     def execute_current_movement(self):
+        """Ejecutar movimiento actual"""
         cmd = Twist()
-        if self.movement_type == "forward":
+        
+        if self.current_movement == "forward":
             cmd.linear.x = self.linear_speed
             cmd.angular.z = 0.0
-        elif self.movement_type == "turn_left":
+        elif self.current_movement == "turn_left":
             cmd.linear.x = 0.0
-            cmd.angular.z = 0.6
-        elif self.movement_type == "turn_right":
+            cmd.angular.z = 0.5  # rad/s
+        elif self.current_movement == "turn_right":
             cmd.linear.x = 0.0
-            cmd.angular.z = -0.6
+            cmd.angular.z = -0.5  # rad/s
+        else:
+            cmd.linear.x = 0.0
+            cmd.angular.z = 0.0
+        
         self.cmd_pub.publish(cmd)
 
     def continuous_navigation(self):
-        if self.current_scan is None:
-            return
+        """Navegación continua una vez localizado (seguimiento de pared)"""
         cmd = Twist()
-        front_blocked = self.front_distance < self.front_collision_distance
-        if front_blocked:
-            left_space = min(self.left_distance, self.left_front_distance)
-            right_space = min(self.right_distance, self.right_front_distance)
-            if left_space > right_space + 0.1:
-                cmd.angular.z = 0.5
-                cmd.linear.x = 0.05
-            elif right_space > left_space + 0.1:
-                cmd.angular.z = -0.5
-                cmd.linear.x = 0.05
+        
+        # Verificar colisiones
+        if (self.front_distance < self.collision_distance or 
+            self.left_front_distance < self.collision_distance or 
+            self.right_front_distance < self.collision_distance):
+            
+            # Parar y rotar para evitar colisión
+            cmd.linear.x = 0.0
+            if self.left_distance > self.right_distance:
+                cmd.angular.z = 0.8
             else:
-                cmd.angular.z = 0.6
-                cmd.linear.x = 0.0
-        elif self.left_distance < 1.2:
-            current_time = self.get_clock().now()
-            if self.last_time is not None:
-                dt = (current_time - self.last_time).nanoseconds * 1e-9
-                if dt > 0:
-                    wall_error = self.left_distance - self.desired_wall_distance
-                    if self.left_front_distance < self.desired_wall_distance * 0.8:
-                        wall_error += (self.desired_wall_distance * 0.8 - self.left_front_distance) * 0.5
-                    p_term = self.kp * wall_error
-                    self.integral_error += wall_error * dt
-                    i_term = self.ki * self.integral_error
-                    d_term = self.kd * (wall_error - self.previous_error) / dt
-                    angular_z = np.clip(p_term + i_term + d_term, -0.5, 0.5)
-                    cmd.linear.x = self.linear_speed
-                    cmd.angular.z = angular_z
-                    self.previous_error = wall_error
-            self.last_time = current_time
+                cmd.angular.z = -0.8
         else:
+            # Seguimiento de pared izquierda con control PID
+            error = self.desired_wall_distance - self.left_wall_distance
+            
+            # Control PID simple
+            self.integral_error += error * 0.1  # dt = 0.1s
+            derivative_error = error - self.previous_error
+            
+            angular_velocity = (self.kp * error + 
+                              self.ki * self.integral_error + 
+                              self.kd * derivative_error)
+            
+            # Limitar velocidad angular
+            angular_velocity = max(-1.0, min(1.0, angular_velocity))
+            
             cmd.linear.x = self.linear_speed
-            cmd.angular.z = 0.3
+            cmd.angular.z = angular_velocity
+            
+            self.previous_error = error
+        
         self.cmd_pub.publish(cmd)
 
-    def stop_robot(self):
-        cmd = Twist()
-        cmd.linear.x = 0.0
-        cmd.angular.z = 0.0
-        self.cmd_pub.publish(cmd)
 
 def main(args=None):
     rclpy.init(args=args)
     navigator = Navigator()
+    
     try:
         rclpy.spin(navigator)
     except KeyboardInterrupt:
@@ -226,6 +262,7 @@ def main(args=None):
     finally:
         navigator.destroy_node()
         rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()
