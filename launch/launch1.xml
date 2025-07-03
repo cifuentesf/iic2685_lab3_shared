@@ -11,7 +11,7 @@
         <param name="view_depth" value="20.0"/>
     </node>
     <node pkg="very_simple_robot_simulator" exec="world_state_gui.py" name="world_state_gui" output="screen">
-        <param name="map_file" value="/root/mp_ws/src/lab3/nodes/data/mapa.yaml" />
+        <param name="map_file" value="/root/ros2_ws/src/iic2685_lab3/iic2685_lab3/nodes/data/mapa.yaml" />
     </node>
 
   <!-- <include file="$(find-pkg-share very_simple_robot_simulator)/launch/minimal_simulator_py.xml" />
@@ -20,8 +20,8 @@
   
 
   <!-- Lanzar nodos Python -->
-  <!-- <node pkg="lab3" exec="read_map.py" output="screen" />-->
-  <!-- <node pkg="lab3" exec="mmm.py" output="screen" />-->
-  <node pkg="lab3" exec="likelihood.py" output="screen" />
-  <!-- <node pkg="lab3" exec="map.py" output="screen" /-->
+  <!-- <node pkg="iic2685_lab3" exec="read_map.py" output="screen" />-->
+  <!-- <node pkg="iic2685_lab3" exec="mmm.py" output="screen" />-->
+  <node pkg="iic2685_lab3" exec="likelihood.py" output="screen" />
+  <!-- <node pkg="iic2685_lab3" exec="map.py" output="screen" /-->
 </launch>

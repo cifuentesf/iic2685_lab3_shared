@@ -39,12 +39,15 @@ class Particle:
 class ParticleFilter(Node):
     def __init__(self):
         super().__init__('particle_filter')
+        # Parámetros
         self.num_particles = 150
         self.sigma_motion = 0.03
         self.sigma_hit = 0.15
         self.z_hit = 0.95
         self.z_random = 0.05
         self.z_max = 3.5
+
+        # Inicialización
         self.particles = []
         self.map_data = None
         self.map_info = None
@@ -55,11 +58,17 @@ class ParticleFilter(Node):
         self.load_map()
         self.precompute_likelihood_field()
         self.initialize_particles()
+        
+        # Subscribers
         self.create_subscription(LaserScan, '/scan', self.laser_callback, 10)
         self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
+
+        # Publishers
         self.particles_pub = self.create_publisher(PoseArray, '/particles', 10)
         self.best_pose_pub = self.create_publisher(PointStamped, '/best_pose', 10)
         self.confidence_pub = self.create_publisher(Float64, '/localization_confidence', 10)
+
+        # Timers
         self.create_timer(0.2, self.mcl_update)
         self.get_logger().info(f"Filtro MCL iniciado con {self.num_particles} partículas")
 

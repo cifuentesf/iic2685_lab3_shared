@@ -75,7 +75,7 @@ class likelihood(Node):
     def calcular_likelihood(self):
         self.get_logger().info("Calculating likelihood field...")
 
-        mapa_path = '/root/mp_ws/src/lab3/nodes/data/mapa.pgm'
+        mapa_path = '/root/ros2_ws/src/iic2685_lab3/iic2685_lab3/nodes/data/mapa.pgm'
         map_img = cv2.imread(mapa_path, cv2.IMREAD_GRAYSCALE)
         
         self.get_logger().info(f"Mapa cargado con forma: {map_img.shape}")
