@@ -31,6 +31,7 @@ setup(
             'simple_navigator.py = iic2685_lab3.simple_navigator:main',
             'particle_filter_mejorada.py = iic2685_lab3.particle_filter_mejorada:main',
             'navigator_mejorada.py = iic2685_lab3.navigator_mejorada:main',
+            'likelihood.py = iic2685_lab3.likelihood:main',
         ],
     },
 )
