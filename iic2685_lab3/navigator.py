@@ -65,7 +65,7 @@ class Navigator(Node):
         # Timer para control (más frecuente para mejor control)
         self.create_timer(0.05, self.control_loop)
         
-        self.get_logger().info("Navegador iniciado - Patrón: Movimiento -> Escaneo -> Movimiento -> ...")
+        self.get_logger().info("Navegador iniciado - Patron: Movimiento -> Escaneo -> Movimiento -> ...")
 
     def laser_callback(self, msg):
         """Callback para datos del láser"""
@@ -110,13 +110,13 @@ class Navigator(Node):
             self.stop_robot()
             best_pose = self.estimate_robot_pose()
             self.get_logger().info(
-                f"🎯 ¡ROBOT LOCALIZADO! 🎯"
+                f"ROBOT LOCALIZADO!"
             )
             self.get_logger().info(
                 f"Confianza: {self.localization_confidence:.3f}"
             )
             self.get_logger().info(
-                f"Posición estimada: x={best_pose[0]:.3f}m, y={best_pose[1]:.3f}m"
+                f"Posicion estimada: x={best_pose[0]:.3f}m, y={best_pose[1]:.3f}m"
             )
             self.get_logger().info("Robot detenido.")
             
@@ -160,9 +160,11 @@ class Navigator(Node):
             self.phase_start_time = current_time
             self.is_in_phase = True
             if self.state == "scanning":
-                self.get_logger().info("📡 Iniciando fase de ESCANEO")
+                self.get_logger().info(
+                    f"Iniciando fase de ESCANEO - Confianza inicial: {self.localization_confidence:.3f}"
+                )
             else:
-                self.get_logger().info("🚀 Iniciando fase de MOVIMIENTO")
+                self.get_logger().info("Iniciando fase de MOVIMIENTO")
         
         # Calcular tiempo transcurrido en la fase actual
         elapsed_time = (current_time - self.phase_start_time).nanoseconds * 1e-9
@@ -171,19 +173,35 @@ class Navigator(Node):
             # Fase de escaneo: robot estático
             self.stop_robot()
             
+            # Reportar nivel de confianza durante el escaneo
+            if hasattr(self, '_last_confidence_report'):
+                if elapsed_time - self._last_confidence_report > 0.5:  # Cada 0.5 segundos
+                    self.get_logger().info(
+                        f"Escaneando... Confianza: {self.localization_confidence:.3f}"
+                    )
+                    self._last_confidence_report = elapsed_time
+            else:
+                self._last_confidence_report = elapsed_time
+            
             if elapsed_time >= self.scan_time:
+                # Reportar confianza final del escaneo
+                self.get_logger().info(
+                    f"Escaneo completado - Confianza: {self.localization_confidence:.3f}"
+                )
                 # Cambiar a fase de movimiento
                 self.state = "moving"
                 self.is_in_phase = False
-                self.get_logger().info("✅ Escaneo completado")
         
         elif self.state == "moving":
             # Fase de movimiento con navegación inteligente
             if elapsed_time >= self.move_time:
+                # Reportar confianza antes de cambiar a escaneo
+                self.get_logger().info(
+                    f"Movimiento completado - Confianza: {self.localization_confidence:.3f}"
+                )
                 # Cambiar a fase de escaneo
                 self.state = "scanning"
                 self.is_in_phase = False
-                self.get_logger().info("✅ Movimiento completado")
                 self.stop_robot()
             else:
                 # Ejecutar navegación inteligente
@@ -195,7 +213,7 @@ class Navigator(Node):
         
         # PRIORIDAD 1: Evitar colisiones
         if self.is_collision_imminent():
-            self.get_logger().info("⚠️  Evitando colisión")
+            self.get_logger().info("Evitando colision")
             cmd = self.avoid_collision()
         
         # PRIORIDAD 2: Seguimiento de pared izquierda
@@ -204,7 +222,7 @@ class Navigator(Node):
         
         # PRIORIDAD 3: Buscar pared izquierda
         else:
-            self.get_logger().info("🔍 Buscando pared izquierda")
+            self.get_logger().info("Buscando pared izquierda")
             cmd = self.search_left_wall()
         
         self.cmd_pub.publish(cmd)
@@ -226,10 +244,10 @@ class Navigator(Node):
         
         if left_space > right_space:
             cmd.angular.z = self.angular_speed  # Rotar izquierda
-            self.get_logger().info("🔄 Rotando a la izquierda")
+            self.get_logger().info("Rotando a la izquierda")
         else:
             cmd.angular.z = -self.angular_speed  # Rotar derecha
-            self.get_logger().info("🔄 Rotando a la derecha")
+            self.get_logger().info("Rotando a la derecha")
         
         return cmd
 
@@ -248,7 +266,7 @@ class Navigator(Node):
             # Buscar distancia equidistante entre paredes
             target_distance = (self.regions['left'] + self.regions['right']) / 2
             error = target_distance - self.regions['left']
-            self.get_logger().info(f"⚖️  Navegando entre paredes - Distancia objetivo: {target_distance:.2f}m")
+            self.get_logger().info(f"Navegando entre paredes - Distancia objetivo: {target_distance:.2f}m")
         else:
             # Control PID normal para pared izquierda
             error = self.desired_wall_distance - self.regions['left']
@@ -276,7 +294,7 @@ class Navigator(Node):
         if hasattr(self, '_last_log_time'):
             if time.time() - self._last_log_time > 1.0:  # Log cada segundo
                 self.get_logger().info(
-                    f"🧭 Siguiendo pared izq: {self.regions['left']:.2f}m "
+                    f"Siguiendo pared izq: {self.regions['left']:.2f}m "
                     f"(objetivo: {self.desired_wall_distance:.2f}m)"
                 )
                 self._last_log_time = time.time()
@@ -292,17 +310,6 @@ class Navigator(Node):
         cmd.angular.z = self.angular_speed * 0.3  # Rotar lentamente a la izquierda
         
         return cmd
-
-    def log_sensor_data(self):
-        """Logging de datos de sensores para debug"""
-        self.get_logger().info(
-            f"Regiones LIDAR - "
-            f"I:{self.regions['left']:.2f} "
-            f"IC:{self.regions['left_center']:.2f} "
-            f"C:{self.regions['center']:.2f} "
-            f"DC:{self.regions['right_center']:.2f} "
-            f"D:{self.regions['right']:.2f}"
-        )
 
 
 def main(args=None):
