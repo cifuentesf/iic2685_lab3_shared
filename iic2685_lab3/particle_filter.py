@@ -52,7 +52,7 @@ class ParticleFilter(Node):
         self.sigma_hit = 0.15
         self.z_hit = 0.95
         self.z_random = 0.05
-        self.z_max = 3.5
+        self.z_max = 4.0  # RANGO MÁXIMO 4 METROS
         
         # Estado del filtro
         self.particles = []

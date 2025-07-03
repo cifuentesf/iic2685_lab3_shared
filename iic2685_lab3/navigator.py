@@ -7,50 +7,48 @@ from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Twist
 from std_msgs.msg import Float64
 from geometry_msgs.msg import PointStamped
+import time
 
 class Navigator(Node):
     def __init__(self):
         super().__init__('navigator')
         
         # Parámetros de navegación
-        self.step_distance = 0.15
-        self.linear_speed = 0.12
+        self.linear_speed = 0.15
+        self.angular_speed = 0.5
         self.confidence_threshold = 0.8
-        self.desired_wall_distance = 0.45
-        self.collision_distance = 0.3
-        self.front_collision_distance = 0.35
+        self.desired_wall_distance = 0.4
+        self.collision_distance = 0.25
+        self.scan_time = 2.0  # Tiempo de escaneo en segundos
+        self.move_time = 1.5  # Tiempo de movimiento en segundos
         
         # Parámetros PID para seguimiento de pared
-        self.kp = 1.2
-        self.ki = 0.01
-        self.kd = 0.08
+        self.kp = 2.0
+        self.ki = 0.1
+        self.kd = 0.5
         self.integral_error = 0.0
         self.previous_error = 0.0
-        self.last_time = None
         
         # Estado del navegador
-        self.state = "filtering"  # "filtering", "exploration", "localized"
+        self.state = "scanning"  # "scanning", "moving", "localized"
         self.current_scan = None
         self.localization_confidence = 0.0
-        self.filter_iterations = 0
-        self.max_filter_iterations = 25
-        self.step_count = 0
         self.localized_announced = False
         
-        # Variables de movimiento
-        self.movement_start_time = None
-        self.movement_duration = 0.0
-        self.is_moving = False
+        # Variables de tiempo
+        self.phase_start_time = None
+        self.is_in_phase = False
         
-        # Distancias del láser
-        self.left_distance = float('inf')
-        self.left_front_distance = float('inf')
-        self.front_distance = float('inf')
-        self.right_front_distance = float('inf')
-        self.right_distance = float('inf')
-        self.left_wall_distance = float('inf')
+        # Regiones del LIDAR (5 sectores)
+        self.regions = {
+            'right': 0.0,
+            'right_center': 0.0,
+            'center': 0.0,
+            'left_center': 0.0,
+            'left': 0.0
+        }
         
-        # Variables para mejor pose - CORRECCIÓN
+        # Variables para mejor pose
         self.best_pose = None
         
         # Subscribers
@@ -59,196 +57,252 @@ class Navigator(Node):
         self.confidence_sub = self.create_subscription(
             Float64, '/localization_confidence', self.confidence_callback, 10)
         self.best_pose_sub = self.create_subscription(
-            PointStamped, '/best_pose', self.best_pose_callback, 10)  # CORRECCIÓN: PointStamped
+            PointStamped, '/best_pose', self.best_pose_callback, 10)
         
         # Publisher
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         
-        # Timer para control
-        self.create_timer(0.1, self.control_loop)
+        # Timer para control (más frecuente para mejor control)
+        self.create_timer(0.05, self.control_loop)
         
-        self.get_logger().info("Navegador iniciado")
+        self.get_logger().info("Navegador iniciado - Patrón: Movimiento -> Escaneo -> Movimiento -> ...")
 
     def laser_callback(self, msg):
         """Callback para datos del láser"""
         self.current_scan = msg
-        self.process_scan_data(msg)
+        self.process_scan_regions(msg)
 
-    def process_scan_data(self, scan):
-        """Procesar datos del láser para extraer distancias por sectores"""
+    def process_scan_regions(self, scan):
+        """Procesar datos del láser en 5 regiones específicas"""
         if scan is None:
             return
         
         ranges = np.array(scan.ranges)
+        # Limpiar datos inválidos - RANGO MÁXIMO 4 METROS
         ranges[~np.isfinite(ranges)] = 4.0
         ranges[ranges <= 0.0] = 4.0
-        ranges[ranges > 3.9] = 4.0
+        ranges[ranges > 4.0] = 4.0
         
         n = len(ranges)
         if n == 0:
             return
         
-        # Dividir en 5 sectores
+        # Dividir en 5 regiones iguales
         sector_size = n // 5
         
-        sectors = {
-            'left': ranges[4*sector_size:],
-            'left_front': ranges[3*sector_size:4*sector_size],
-            'front': ranges[2*sector_size:3*sector_size],
-            'right_front': ranges[sector_size:2*sector_size],
-            'right': ranges[:sector_size]
+        # Asignar regiones (índices de izquierda a derecha en el array)
+        self.regions = {
+            'right': np.min(ranges[0:sector_size]) if sector_size > 0 else 10.0,
+            'right_center': np.min(ranges[sector_size:2*sector_size]) if sector_size > 0 else 10.0,
+            'center': np.min(ranges[2*sector_size:3*sector_size]) if sector_size > 0 else 10.0,
+            'left_center': np.min(ranges[3*sector_size:4*sector_size]) if sector_size > 0 else 10.0,
+            'left': np.min(ranges[4*sector_size:]) if n > 4*sector_size else 10.0
         }
-        
-        # Calcular distancias mínimas por sector
-        self.left_distance = np.min(sectors['left']) if len(sectors['left']) > 0 else float('inf')
-        self.left_front_distance = np.min(sectors['left_front']) if len(sectors['left_front']) > 0 else float('inf')
-        self.front_distance = np.min(sectors['front']) if len(sectors['front']) > 0 else float('inf')
-        self.right_front_distance = np.min(sectors['right_front']) if len(sectors['right_front']) > 0 else float('inf')
-        self.right_distance = np.min(sectors['right']) if len(sectors['right']) > 0 else float('inf')
-        
-        # Distancia promedio a la pared izquierda para seguimiento
-        self.left_wall_distance = np.mean(sectors['left']) if len(sectors['left']) > 0 else float('inf')
 
     def confidence_callback(self, msg):
         """Callback para confianza de localización"""
         self.localization_confidence = msg.data
         
-        # Transiciones de estado
-        if self.state == "filtering" and self.localization_confidence > self.confidence_threshold:
-            if not self.localized_announced:
-                best_pose = self.estimate_robot_pose()
-                self.get_logger().info(
-                    f"¡Robot localizado! Confianza: {self.localization_confidence:.3f}, "
-                    f"Pose estimada: x={best_pose[0]:.3f}, y={best_pose[1]:.3f}, θ={best_pose[2]:.3f}"
-                )
-                self.localized_announced = True
-                self.state = "localized"
-        elif self.state == "filtering" and self.filter_iterations >= self.max_filter_iterations:
-            self.state = "exploration"
-            self.get_logger().info("Iniciando exploración reactiva")
+        # Verificar si se alcanzó alta confianza
+        if (self.localization_confidence > self.confidence_threshold and 
+            not self.localized_announced):
+            
+            self.stop_robot()
+            best_pose = self.estimate_robot_pose()
+            self.get_logger().info(
+                f"🎯 ¡ROBOT LOCALIZADO! 🎯"
+            )
+            self.get_logger().info(
+                f"Confianza: {self.localization_confidence:.3f}"
+            )
+            self.get_logger().info(
+                f"Posición estimada: x={best_pose[0]:.3f}m, y={best_pose[1]:.3f}m"
+            )
+            self.get_logger().info("Robot detenido.")
+            
+            self.localized_announced = True
+            self.state = "localized"
 
     def best_pose_callback(self, msg):
-        """Callback para mejor pose estimada - CORRECCIÓN"""
+        """Callback para mejor pose estimada"""
         self.best_pose = msg
 
     def estimate_robot_pose(self):
-        """Estimar pose del robot - CORRECCIÓN"""
+        """Estimar pose del robot"""
         if self.best_pose is not None:
-            x = self.best_pose.point.x  # CORRECCIÓN: point.x en lugar de linear.x
-            y = self.best_pose.point.y  # CORRECCIÓN: point.y en lugar de linear.y
-            theta = 0.0  # PointStamped no incluye orientación
+            x = self.best_pose.point.x
+            y = self.best_pose.point.y
         else:
-            x = y = theta = 0.0
-        return (x, y, theta)
+            x = y = 0.0
+        return (x, y)
 
-    def control_loop(self):
-        """Bucle principal de control"""
-        if self.current_scan is None:
-            return
-        
-        if self.state == "filtering":
-            self.filtering_behavior()
-        elif self.state == "exploration":
-            self.exploration_behavior()
-        elif self.state == "localized":
-            self.continuous_navigation()
-
-    def filtering_behavior(self):
-        """Comportamiento durante la fase de filtrado (robot estático)"""
+    def stop_robot(self):
+        """Detener completamente el robot"""
         cmd = Twist()
         cmd.linear.x = 0.0
         cmd.angular.z = 0.0
         self.cmd_pub.publish(cmd)
-        self.filter_iterations += 1
 
-    def exploration_behavior(self):
-        """Comportamiento de exploración reactiva"""
+    def control_loop(self):
+        """Bucle principal de control con patrón movimiento-escaneo"""
+        if self.current_scan is None:
+            return
+        
+        if self.state == "localized":
+            # Robot ya localizado, mantener detenido
+            self.stop_robot()
+            return
+        
         current_time = self.get_clock().now()
         
-        if not self.is_moving:
-            self.decide_next_movement()
-            self.movement_start_time = current_time
-            self.is_moving = True
-        else:
-            elapsed = (current_time - self.movement_start_time).nanoseconds * 1e-9
-            if elapsed < self.movement_duration:
-                self.execute_current_movement()
+        # Inicializar fase si es necesario
+        if not self.is_in_phase:
+            self.phase_start_time = current_time
+            self.is_in_phase = True
+            if self.state == "scanning":
+                self.get_logger().info("📡 Iniciando fase de ESCANEO")
             else:
-                # Movimiento completado
-                self.is_moving = False
-                self.step_count += 1
-
-    def decide_next_movement(self):
-        """Decidir próximo movimiento basado en sensores"""
-        # Movimiento reactivo simple
-        if self.front_distance < self.front_collision_distance:
-            # Hay obstáculo al frente, rotar
-            if self.left_distance > self.right_distance:
-                self.current_movement = "turn_left"
-                self.movement_duration = 1.0  # 1 segundo de rotación
+                self.get_logger().info("🚀 Iniciando fase de MOVIMIENTO")
+        
+        # Calcular tiempo transcurrido en la fase actual
+        elapsed_time = (current_time - self.phase_start_time).nanoseconds * 1e-9
+        
+        if self.state == "scanning":
+            # Fase de escaneo: robot estático
+            self.stop_robot()
+            
+            if elapsed_time >= self.scan_time:
+                # Cambiar a fase de movimiento
+                self.state = "moving"
+                self.is_in_phase = False
+                self.get_logger().info("✅ Escaneo completado")
+        
+        elif self.state == "moving":
+            # Fase de movimiento con navegación inteligente
+            if elapsed_time >= self.move_time:
+                # Cambiar a fase de escaneo
+                self.state = "scanning"
+                self.is_in_phase = False
+                self.get_logger().info("✅ Movimiento completado")
+                self.stop_robot()
             else:
-                self.current_movement = "turn_right"
-                self.movement_duration = 1.0
-        else:
-            # Camino despejado, avanzar
-            self.current_movement = "forward"
-            self.movement_duration = self.step_distance / self.linear_speed
+                # Ejecutar navegación inteligente
+                self.intelligent_navigation()
 
-    def execute_current_movement(self):
-        """Ejecutar movimiento actual"""
+    def intelligent_navigation(self):
+        """Navegación inteligente con prioridades"""
         cmd = Twist()
         
-        if self.current_movement == "forward":
-            cmd.linear.x = self.linear_speed
-            cmd.angular.z = 0.0
-        elif self.current_movement == "turn_left":
-            cmd.linear.x = 0.0
-            cmd.angular.z = 0.5  # rad/s
-        elif self.current_movement == "turn_right":
-            cmd.linear.x = 0.0
-            cmd.angular.z = -0.5  # rad/s
+        # PRIORIDAD 1: Evitar colisiones
+        if self.is_collision_imminent():
+            self.get_logger().info("⚠️  Evitando colisión")
+            cmd = self.avoid_collision()
+        
+        # PRIORIDAD 2: Seguimiento de pared izquierda
+        elif self.has_left_wall():
+            cmd = self.follow_left_wall()
+        
+        # PRIORIDAD 3: Buscar pared izquierda
         else:
-            cmd.linear.x = 0.0
-            cmd.angular.z = 0.0
+            self.get_logger().info("🔍 Buscando pared izquierda")
+            cmd = self.search_left_wall()
         
         self.cmd_pub.publish(cmd)
 
-    def continuous_navigation(self):
-        """Navegación continua una vez localizado (seguimiento de pared)"""
+    def is_collision_imminent(self):
+        """Verificar si hay riesgo de colisión inminente"""
+        return (self.regions['center'] < self.collision_distance or
+                self.regions['left_center'] < self.collision_distance or
+                self.regions['right_center'] < self.collision_distance)
+
+    def avoid_collision(self):
+        """Evitar colisión rotando hacia el lado más libre"""
+        cmd = Twist()
+        cmd.linear.x = 0.0
+        
+        # Rotar hacia el lado con más espacio
+        left_space = (self.regions['left'] + self.regions['left_center']) / 2
+        right_space = (self.regions['right'] + self.regions['right_center']) / 2
+        
+        if left_space > right_space:
+            cmd.angular.z = self.angular_speed  # Rotar izquierda
+            self.get_logger().info("🔄 Rotando a la izquierda")
+        else:
+            cmd.angular.z = -self.angular_speed  # Rotar derecha
+            self.get_logger().info("🔄 Rotando a la derecha")
+        
+        return cmd
+
+    def has_left_wall(self):
+        """Verificar si hay una pared a la izquierda"""
+        return self.regions['left'] < 3.0  # Considerar pared si está a menos de 3m (dentro del rango de 4m)
+
+    def follow_left_wall(self):
+        """Seguir pared izquierda con control PID"""
         cmd = Twist()
         
-        # Verificar colisiones
-        if (self.front_distance < self.collision_distance or 
-            self.left_front_distance < self.collision_distance or 
-            self.right_front_distance < self.collision_distance):
+        # PRIORIDAD 3: Verificar si mantener distancia causaría colisión derecha
+        if (self.regions['right'] < self.collision_distance and 
+            abs(self.regions['left'] - self.desired_wall_distance) < 0.1):
             
-            # Parar y rotar para evitar colisión
-            cmd.linear.x = 0.0
-            if self.left_distance > self.right_distance:
-                cmd.angular.z = 0.8
-            else:
-                cmd.angular.z = -0.8
+            # Buscar distancia equidistante entre paredes
+            target_distance = (self.regions['left'] + self.regions['right']) / 2
+            error = target_distance - self.regions['left']
+            self.get_logger().info(f"⚖️  Navegando entre paredes - Distancia objetivo: {target_distance:.2f}m")
         else:
-            # Seguimiento de pared izquierda con control PID
-            error = self.desired_wall_distance - self.left_wall_distance
-            
-            # Control PID simple
-            self.integral_error += error * 0.1  # dt = 0.1s
-            derivative_error = error - self.previous_error
-            
-            angular_velocity = (self.kp * error + 
-                              self.ki * self.integral_error + 
-                              self.kd * derivative_error)
-            
-            # Limitar velocidad angular
-            angular_velocity = max(-1.0, min(1.0, angular_velocity))
-            
-            cmd.linear.x = self.linear_speed
-            cmd.angular.z = angular_velocity
-            
-            self.previous_error = error
+            # Control PID normal para pared izquierda
+            error = self.desired_wall_distance - self.regions['left']
         
-        self.cmd_pub.publish(cmd)
+        # Control PID
+        self.integral_error += error * 0.05  # dt = 0.05s
+        derivative_error = error - self.previous_error
+        
+        # Limitar integral para evitar windup
+        self.integral_error = max(-1.0, min(1.0, self.integral_error))
+        
+        angular_velocity = (self.kp * error + 
+                          self.ki * self.integral_error + 
+                          self.kd * derivative_error)
+        
+        # Limitar velocidad angular
+        angular_velocity = max(-self.angular_speed, min(self.angular_speed, angular_velocity))
+        
+        cmd.linear.x = self.linear_speed
+        cmd.angular.z = angular_velocity
+        
+        self.previous_error = error
+        
+        # Logging cada cierto tiempo
+        if hasattr(self, '_last_log_time'):
+            if time.time() - self._last_log_time > 1.0:  # Log cada segundo
+                self.get_logger().info(
+                    f"🧭 Siguiendo pared izq: {self.regions['left']:.2f}m "
+                    f"(objetivo: {self.desired_wall_distance:.2f}m)"
+                )
+                self._last_log_time = time.time()
+        else:
+            self._last_log_time = time.time()
+        
+        return cmd
+
+    def search_left_wall(self):
+        """Buscar pared izquierda rotando"""
+        cmd = Twist()
+        cmd.linear.x = self.linear_speed * 0.5  # Avanzar más lento mientras busca
+        cmd.angular.z = self.angular_speed * 0.3  # Rotar lentamente a la izquierda
+        
+        return cmd
+
+    def log_sensor_data(self):
+        """Logging de datos de sensores para debug"""
+        self.get_logger().info(
+            f"Regiones LIDAR - "
+            f"I:{self.regions['left']:.2f} "
+            f"IC:{self.regions['left_center']:.2f} "
+            f"C:{self.regions['center']:.2f} "
+            f"DC:{self.regions['right_center']:.2f} "
+            f"D:{self.regions['right']:.2f}"
+        )
 
 
 def main(args=None):
