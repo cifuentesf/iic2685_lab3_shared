@@ -6,22 +6,28 @@ import numpy as np
 from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Twist
 from std_msgs.msg import Float64
-from geometry_msgs.msg import PointStamped
 
 class Navigator(Node):
+
     def __init__(self):
         super().__init__('navigator')
+
+        # Parámetros
         self.step_distance = 0.15
         self.linear_speed = 0.12
         self.confidence_threshold = 0.8
         self.desired_wall_distance = 0.45
         self.collision_distance = 0.3
         self.front_collision_distance = 0.35
+
+        #PID
         self.kp = 1.2
         self.ki = 0.01
         self.kd = 0.08
         self.integral_error = 0.0
         self.previous_error = 0.0
+
+        # Estados
         self.last_time = None
         self.state = "filtering"
         self.current_scan = None
@@ -30,6 +36,8 @@ class Navigator(Node):
         self.max_filter_iterations = 25
         self.step_count = 0
         self.localized_announced = False
+
+        # Movimiento
         self.movement_start_time = None
         self.movement_duration = 0.0
         self.is_moving = False
@@ -39,13 +47,19 @@ class Navigator(Node):
         self.right_front_distance = float('inf')
         self.right_distance = float('inf')
         self.left_wall_distance = float('inf')
-        self.scan_sub = self.create_subscription(LaserScan, '/scan', self.laser_callback, 10)
-        self.coef_sub = self.create_subscription(Float64, '/localization_confidence', self.confidence_callback, 10)
-        self.best_pose_sub = self.create_subscription(PointStamped, '/best_pose', self.best_pose_callback, 10)
-        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
-        self.create_timer(0.1, self.control_loop)
-        self.get_logger().info("Navegador iniciado")
 
+        # Subscribers
+        self.create_subscription(LaserScan, '/scan', self.laser_callback, 10)
+        self.create_subscription(Float64, '/localization_confidence', self.confidence_callback, 10)
+        
+        # Publishers
+        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+
+        # Timers
+        self.create_timer(0.1, self.control_loop)
+        self.get_logger().info("Navegador iniciado - Fase de filtrado inicial")
+
+    #Callbacks
     def laser_callback(self, msg):
         self.current_scan = msg
         self.process_scan_data(msg)
@@ -100,14 +114,9 @@ class Navigator(Node):
             self.state = "exploration"
             self.get_logger().info("Iniciando exploración reactiva")
 
-    def best_pose_callback(self, msg):
-        self.best_pose = msg
-
+    # Loop
     def estimate_robot_pose(self):
-        x = self.best_pose.linear.x if hasattr(self, 'best_pose') else 0.0
-        y = self.best_pose.linear.y if hasattr(self, 'best_pose') else 0.0
-        theta = self.best_pose.angular.z if hasattr(self, 'best_pose') else 0.0
-        return (x, y, theta)
+        return [1.0, 1.0, 0.0]
 
     def control_loop(self):
         if self.current_scan is None:
@@ -120,6 +129,7 @@ class Navigator(Node):
         elif self.state == "localized":
             self.continuous_navigation()
 
+    # Estados
     def filtering_behavior(self):
         cmd = Twist()
         cmd.linear.x = 0.0
@@ -219,6 +229,7 @@ class Navigator(Node):
 def main(args=None):
     rclpy.init(args=args)
     navigator = Navigator()
+    
     try:
         rclpy.spin(navigator)
     except KeyboardInterrupt:
@@ -226,6 +237,7 @@ def main(args=None):
     finally:
         navigator.destroy_node()
         rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()

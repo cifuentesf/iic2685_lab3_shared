@@ -9,7 +9,7 @@ from std_msgs.msg import Float64
 from geometry_msgs.msg import PointStamped
 import time
 
-class Navigator(Node):
+class NavigatorUPD(Node):
     def __init__(self):
         super().__init__('navigator')
         

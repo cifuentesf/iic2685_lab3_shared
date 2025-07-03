@@ -30,9 +30,9 @@
   <!-- LAB 3 - Actividad 2 -->
   
   <!-- Filtro de Partículas -->
-  <node pkg="iic2685_lab3" exec="particle_filter_mejorada.py" name="particle_filter" output="screen" />
+  <node pkg="iic2685_lab3" exec="particle_filter_mejorada.py" name="particle_filterUPD" output="screen" />
   
   <!-- Navegación -->
-  <node pkg="iic2685_lab3" exec="navigator_mejorada.py" name="navigation" output="screen" />
+  <node pkg="iic2685_lab3" exec="navigator_mejorada.py" name="navigationUPD" output="screen" />
   
 </launch>

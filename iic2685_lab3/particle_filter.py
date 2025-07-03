@@ -11,7 +11,6 @@ from geometry_msgs.msg import PoseArray, Pose, PointStamped
 from std_msgs.msg import Float64, Header
 from tf_transformations import quaternion_from_euler, euler_from_quaternion
 from scipy.spatial.distance import cdist
-from scipy.ndimage import binary_erosion
 
 class Particle:
     def __init__(self, x, y, ang, sigma=0.02):
@@ -36,16 +35,16 @@ class Particle:
             angle += 2 * np.pi
         return angle
 
+
 class ParticleFilter(Node):
     def __init__(self):
         super().__init__('particle_filter')
-        self.num_particles = 200
+        self.num_particles = 150
         self.sigma_motion = 0.03
         self.sigma_hit = 0.15
         self.z_hit = 0.95
         self.z_random = 0.05
         self.z_max = 3.5
-        self.min_distance_from_obstacles = 0.3
         self.particles = []
         self.map_data = None
         self.map_info = None
@@ -77,11 +76,14 @@ class ParticleFilter(Node):
                 'width': self.map_data.shape[1],
                 'height': self.map_data.shape[0]
             }
+            self.get_logger().info(f"Mapa cargado: {self.map_info['width']}x{self.map_info['height']}")
         except Exception as e:
+            self.get_logger().error(f"Error cargando mapa: {e}")
             self.map_data = np.ones((270, 270), dtype=np.uint8) * 255
             self.map_info = {'resolution': 0.01, 'origin': [0.0, 0.0, 0.0], 'width': 270, 'height': 270}
 
     def precompute_likelihood_field(self):
+        self.get_logger().info("Precalculando campo de verosimilitud...")
         obstacle_pixels = np.where(self.map_data < 100)
         if len(obstacle_pixels[0]) == 0:
             self.likelihood_field = np.ones_like(self.map_data, dtype=np.float32) * 0.1
@@ -92,42 +94,37 @@ class ParticleFilter(Node):
         obstacle_coords = np.column_stack([obstacle_pixels[0], obstacle_pixels[1]])
         distances = cdist(all_coords, obstacle_coords, metric='euclidean')
         min_distances = np.min(distances, axis=1)
-        min_distances_meters = min_distances * self.map_info['resolution']
-        likelihood_values = np.exp(-0.5 * (min_distances_meters / self.sigma_hit) ** 2)
-        likelihood_values = likelihood_values / np.max(likelihood_values)
+        likelihood_values = np.exp(-0.5 * (min_distances / (self.sigma_hit / self.map_info['resolution'])) ** 2)
         self.likelihood_field = likelihood_values.reshape(h, w).astype(np.float32)
+        self.get_logger().info("Campo de verosimilitud calculado")
 
     def initialize_particles(self):
         self.particles = []
-        free_space_mask = self.map_data > 200
-        erosion_pixels = int(self.min_distance_from_obstacles / self.map_info['resolution'])
-        kernel = np.ones((erosion_pixels*2+1, erosion_pixels*2+1), np.uint8)
-        eroded_mask = binary_erosion(free_space_mask, structure=kernel)
-        safe_cells = np.where(eroded_mask)
-        if len(safe_cells[0]) == 0:
-            safe_cells = np.where(free_space_mask)
-            if len(safe_cells[0]) == 0:
-                for _ in range(self.num_particles):
-                    x = uniform(0.5, (self.map_info['width'] - 1) * self.map_info['resolution'])
-                    y = uniform(0.5, (self.map_info['height'] - 1) * self.map_info['resolution'])
-                    ang = uniform(-np.pi, np.pi)
-                    self.particles.append(Particle(x, y, ang, self.sigma_motion))
-                return
         attempts = 0
-        max_attempts = 10000
+        max_attempts = self.num_particles * 10
         while len(self.particles) < self.num_particles and attempts < max_attempts:
-            idx = np.random.randint(len(safe_cells[0]))
-            py, px = safe_cells[0][idx], safe_cells[1][idx]
-            x = px * self.map_info['resolution'] + self.map_info['origin'][0]
-            y = py * self.map_info['resolution'] + self.map_info['origin'][1]
+            x = uniform(0.5, 2.0)
+            y = uniform(0.5, 2.0)
             ang = uniform(-np.pi, np.pi)
-            margin = 0.1
-            if (margin <= x <= (self.map_info['width'] * self.map_info['resolution'] - margin) and
-                margin <= y <= (self.map_info['height'] * self.map_info['resolution'] - margin)):
-                self.particles.append(Particle(x, y, ang, self.sigma_motion))
+            if self.is_free_space(x, y):
+                particle = Particle(x, y, ang, self.sigma_motion)
+                particle.weight = 1.0 / self.num_particles
+                self.particles.append(particle)
             attempts += 1
-        for particle in self.particles:
+        while len(self.particles) < self.num_particles:
+            x = uniform(0.5, 2.0)
+            y = uniform(0.5, 2.0)
+            ang = uniform(-np.pi, np.pi)
+            particle = Particle(x, y, ang, self.sigma_motion)
             particle.weight = 1.0 / self.num_particles
+            self.particles.append(particle)
+
+    def is_free_space(self, x, y):
+        px = int((x - self.map_info['origin'][0]) / self.map_info['resolution'])
+        py = int((y - self.map_info['origin'][1]) / self.map_info['resolution'])
+        if px < 0 or px >= self.map_info['width'] or py < 0 or py >= self.map_info['height']:
+            return False
+        return self.map_data[py, px] > 200
 
     def laser_callback(self, msg):
         self.current_scan = msg
@@ -136,18 +133,12 @@ class ParticleFilter(Node):
         self.last_odom = msg
 
     def mcl_update(self):
-        if self.current_scan is None:
+        if self.current_scan is None or len(self.particles) == 0:
             return
-        if self.last_odom is not None and self.prev_odom is not None:
-            scan_time = self.current_scan.header.stamp.sec + self.current_scan.header.stamp.nanosec * 1e-9
-            odom_time = self.last_odom.header.stamp.sec + self.last_odom.header.stamp.nanosec * 1e-9
-            time_diff = abs(scan_time - odom_time)
-            if time_diff < 0.1:
-                self.sample_motion_model()
+        if self.last_odom is not None:
+            self.sample_motion_model()
         self.measurement_model_update()
-        self.normalize_weights()
-        ess = self.effective_sample_size()
-        if ess < self.num_particles * 0.5:
+        if self.effective_sample_size() < self.num_particles * 0.5:
             self.resample()
         confidence = self.calculate_confidence()
         self.publish_particles()
@@ -158,37 +149,26 @@ class ParticleFilter(Node):
         if self.prev_odom is None:
             self.prev_odom = self.last_odom
             return
-        try:
-            dx = self.last_odom.pose.pose.position.x - self.prev_odom.pose.pose.position.x
-            dy = self.last_odom.pose.pose.position.y - self.prev_odom.pose.pose.position.y
-            curr_yaw = euler_from_quaternion([
-                self.last_odom.pose.pose.orientation.x,
-                self.last_odom.pose.pose.orientation.y,
-                self.last_odom.pose.pose.orientation.z,
-                self.last_odom.pose.pose.orientation.w
-            ])[2]
-            prev_yaw = euler_from_quaternion([
-                self.prev_odom.pose.pose.orientation.x,
-                self.prev_odom.pose.pose.orientation.y,
-                self.prev_odom.pose.pose.orientation.z,
-                self.prev_odom.pose.pose.orientation.w
-            ])[2]
-            dyaw = Particle.normalize_angle(curr_yaw - prev_yaw)
-            movement_magnitude = np.sqrt(dx*dx + dy*dy)
-            noise_scale = max(0.001, movement_magnitude * 0.1)
-            for particle in self.particles:
-                particle.move(dx, dy, dyaw)
-                particle.x += np.random.normal(0, noise_scale)
-                particle.y += np.random.normal(0, noise_scale)
-                particle.ang += np.random.normal(0, noise_scale * 0.1)
-                particle.ang = Particle.normalize_angle(particle.ang)
-            self.prev_odom = self.last_odom
-        except Exception as e:
-            pass
+        dx = self.last_odom.pose.pose.position.x - self.prev_odom.pose.pose.position.x
+        dy = self.last_odom.pose.pose.position.y - self.prev_odom.pose.pose.position.y
+        curr_yaw = euler_from_quaternion([
+            self.last_odom.pose.pose.orientation.x,
+            self.last_odom.pose.pose.orientation.y,
+            self.last_odom.pose.pose.orientation.z,
+            self.last_odom.pose.pose.orientation.w
+        ])[2]
+        prev_yaw = euler_from_quaternion([
+            self.prev_odom.pose.pose.orientation.x,
+            self.prev_odom.pose.pose.orientation.y,
+            self.prev_odom.pose.pose.orientation.z,
+            self.prev_odom.pose.pose.orientation.w
+        ])[2]
+        dyaw = Particle.normalize_angle(curr_yaw - prev_yaw)
+        for particle in self.particles:
+            particle.move(dx, dy, dyaw)
+        self.prev_odom = self.last_odom
 
     def measurement_model_update(self):
-        if self.current_scan is None:
-            return
         ranges = np.array(self.current_scan.ranges)
         ranges[~np.isfinite(ranges)] = self.z_max
         ranges[ranges <= 0.0] = self.z_max
@@ -199,32 +179,21 @@ class ParticleFilter(Node):
         for particle in self.particles:
             likelihood = 1.0
             for i in range(0, len(ranges), step):
-                z_measured = ranges[i]
-                if z_measured >= self.z_max:
+                z = ranges[i]
+                if z >= self.z_max:
                     continue
-                beam_angle = angle_min + i * angle_inc + particle.ang
-                x_z = particle.x + z_measured * np.cos(beam_angle)
-                y_z = particle.y + z_measured * np.sin(beam_angle)
-                px = int((x_z - self.map_info['origin'][0]) / self.map_info['resolution'])
-                py = int((y_z - self.map_info['origin'][1]) / self.map_info['resolution'])
+                angle = angle_min + i * angle_inc + particle.ang
+                x_hit = particle.x + z * np.cos(angle)
+                y_hit = particle.y + z * np.sin(angle)
+                px = int((x_hit - self.map_info['origin'][0]) / self.map_info['resolution'])
+                py = int((y_hit - self.map_info['origin'][1]) / self.map_info['resolution'])
                 if 0 <= px < self.map_info['width'] and 0 <= py < self.map_info['height']:
                     p_hit = self.z_hit * self.likelihood_field[py, px]
                 else:
-                    p_hit = 0.01
+                    p_hit = 0.0
                 p_random = self.z_random / self.z_max
-                beam_likelihood = p_hit + p_random
-                likelihood *= beam_likelihood
+                likelihood *= (p_hit + p_random)
             particle.weight = likelihood
-
-    def normalize_weights(self):
-        weights = np.array([p.weight for p in self.particles])
-        if np.sum(weights) == 0:
-            for particle in self.particles:
-                particle.weight = 1.0 / self.num_particles
-        else:
-            weights_sum = np.sum(weights)
-            for i, particle in enumerate(self.particles):
-                particle.weight = weights[i] / weights_sum
 
     def resample(self):
         weights = np.array([p.weight for p in self.particles])
@@ -254,10 +223,8 @@ class ParticleFilter(Node):
         if np.sum(weights) == 0:
             return 0.0
         weights /= np.sum(weights)
-        entropy = -np.sum(weights * np.log(weights + 1e-10))
-        max_entropy = np.log(len(self.particles))
-        confidence = 1.0 - (entropy / max_entropy)
-        return confidence
+        max_weight = np.max(weights)
+        return min(max_weight * 10, 1.0)
 
     def publish_particles(self):
         pose_array = PoseArray()
@@ -278,11 +245,9 @@ class ParticleFilter(Node):
         self.particles_pub.publish(pose_array)
 
     def publish_best_pose(self):
-        if not self.particles:
+        if len(self.particles) == 0:
             return
-        weights = [p.weight for p in self.particles]
-        best_idx = np.argmax(weights)
-        best_particle = self.particles[best_idx]
+        best_particle = max(self.particles, key=lambda p: p.weight)
         point_msg = PointStamped()
         point_msg.header.frame_id = "odom"
         point_msg.header.stamp = self.get_clock().now().to_msg()
@@ -292,25 +257,12 @@ class ParticleFilter(Node):
         self.best_pose_pub.publish(point_msg)
 
     def publish_confidence(self, confidence):
-        confidence_msg = Float64()
-        confidence_msg.data = confidence
-        self.confidence_pub.publish(confidence_msg)
+        msg = Float64()
+        msg.data = confidence
+        self.confidence_pub.publish(msg)
 
 def main(args=None):
     rclpy.init(args=args)
-    particle_filter = ParticleFilter()
-    try:
-        rclpy.spin(particle_filter)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        particle_filter.destroy_node()
-        rclpy.shutdown()
-
-if __name__
-def main(args=None):
-    rclpy.init(args=args)
-    
     particle_filter = ParticleFilter()
     
     try:

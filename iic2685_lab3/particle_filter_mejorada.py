@@ -15,7 +15,7 @@ import yaml
 import os
 
 
-class Particle:
+class ParticleUPD:
     def __init__(self, x, y, ang, sigma=0.02):
         """Clase partícula basada en ayudantia_rviz"""
         self.x, self.y, self.ang = x, y, ang
@@ -40,7 +40,7 @@ class Particle:
         return angle
 
 
-class ParticleFilter(Node):
+class ParticleFilterUPD(Node):
     def __init__(self):
         """Filtro de partículas"""
         super().__init__('particle_filter')
