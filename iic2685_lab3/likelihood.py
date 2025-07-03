@@ -9,6 +9,8 @@ from cv_bridge import CvBridge
 import numpy as np
 from geometry_msgs.msg import Vector3, Pose
 from tf_transformations import euler_from_quaternion
+from ament_index_python.packages import get_package_share_directory
+import os
 
 class likelihood(Node):
     def __init__(self):
@@ -75,7 +77,8 @@ class likelihood(Node):
     def calcular_likelihood(self):
         self.get_logger().info("Calculating likelihood field...")
 
-        mapa_path = '/root/ros2_ws/src/iic2685_lab3/iic2685_lab3/nodes/data/mapa.pgm'
+        package_path = get_package_share_directory('iic2685_lab3')
+        mapa_path = os.path.join(package_path, 'maps', 'mapa.pgm')
         map_img = cv2.imread(mapa_path, cv2.IMREAD_GRAYSCALE)
         
         self.get_logger().info(f"Mapa cargado con forma: {map_img.shape}")
