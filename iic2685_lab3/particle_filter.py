@@ -11,6 +11,8 @@ from geometry_msgs.msg import PoseArray, Pose, PointStamped
 from std_msgs.msg import Float64, Header
 from tf_transformations import quaternion_from_euler, euler_from_quaternion
 from scipy.spatial.distance import cdist
+import os
+from ament_index_python.packages import get_package_share_directory
 
 class Particle:
     def __init__(self, x, y, ang, sigma=0.02):
@@ -74,8 +76,6 @@ class ParticleFilter(Node):
 
     def load_map(self):
         try:
-            import os
-            from ament_index_python.packages import get_package_share_directory
             pkg_share = get_package_share_directory('iic2685_lab3')
             map_path = os.path.join(pkg_share, 'maps', 'mapa.pgm')
             self.map_data = cv2.imread(map_path, cv2.IMREAD_GRAYSCALE)
